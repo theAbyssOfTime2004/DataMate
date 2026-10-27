@@ -1,0 +1,39 @@
+# Fixed business-level splits for DataMate (hand-written, do not generate randomly).
+# Holdout family: single-sheet handwritten ledgers (never tuned on).
+poc:
+  - biz_101
+  - biz_105
+  - biz_106
+  - biz_111
+  - biz_123
+
+val:
+  - biz_104
+  - biz_110
+  - biz_118
+  - biz_120
+  - biz_124
+  - biz_127
+
+holdout_family:
+  - biz_107
+  - biz_113
+  - biz_126
+
+dev:
+  - biz_102
+  - biz_103
+  - biz_108
+  - biz_109
+  - biz_112
+  - biz_114
+  - biz_115
+  - biz_116
+  - biz_117
+  - biz_119
+  - biz_121
+  - biz_122
+  - biz_125
+  - biz_128
+  - biz_129
+  - biz_130
