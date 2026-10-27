@@ -1,10 +1,13 @@
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=PROJECT_ROOT / ".env", extra="ignore")
 
     data_root: Path = Path("D:/zaloaic")
     cache_dir: Path = Path("cache")
@@ -14,6 +17,13 @@ class Settings(BaseSettings):
     llm_api_key: str = "EMPTY"
     llm_timeout_s: float = 120.0
     seed: int = 20261116
+
+    @field_validator("cache_dir", "runs_dir", mode="after")
+    @classmethod
+    def _resolve_project_dir(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            return PROJECT_ROOT / value
+        return value
 
     def split_dir(self, split: str) -> Path:
         path = self.data_root / split

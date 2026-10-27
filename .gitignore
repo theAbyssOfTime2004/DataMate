@@ -11,6 +11,10 @@ dist/
 cache/
 runs/
 *.zip
-train/
-public_test/
-private_test/
+/train/
+/public_test/
+/private_test/
+
+# Cursor: keep project rules, ignore everything else (may contain tokens)
+/.cursor/*
+!/.cursor/rules/
