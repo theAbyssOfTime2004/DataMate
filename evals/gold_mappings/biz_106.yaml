@@ -1,0 +1,82 @@
+business_id: biz_106
+status: verified          # 2026-10-27, user reviewed
+format_family: pos_export_danhsach    # Excel xuất từ máy POS / phần mềm, kiểu DanhSach*
+data_end_date: 2026-09-14             # README
+customer_identity: by_code            # có Mã KH
+walk_in_values: ["Khách lẻ"]          # ĐÃ KIỂM: cả 31.660 đơn trống Mã KH đều ghi "Khách lẻ"; không đơn nào có Mã KH mà tên là khách lẻ
+return_rule: status
+
+status_map:                           # ĐÃ KIỂM: cột "Trạng thái" có đúng 7 giá trị
+  "xong": completed
+  "Hoàn thành": completed
+  "hủy đơn": cancelled
+  "Đã hủy": cancelled
+  "trả lại": returned
+  "Hoàn trả": returned
+  "Đang giao dịch": shipping          # ĐÃ KIỂM: 23 đơn, đều trong 01–14/09/2026 (sát ngày cuối dữ liệu). Câu "bao nhiêu ly size L tháng này" (as_of 14/09/2026): chỉ tính đơn hoàn thành = 1.081, tính thêm Đang giao dịch = 1.088 = đáp án
+
+tables:
+  orders:
+    sources:
+      - {file: DanhSachHoaDon.xlsx, sheet: Sheet1, header_row: 3}   # dòng 1 "DANH SÁCH HÓA ĐƠN", dòng 2 trống
+    columns:
+      order_id: "Mã hóa đơn"
+      order_date: "Thời gian"         # lẫn số serial (45958) và "30/04/2026"
+      order_ts: "Thời gian tạo"       # serial có giờ. ĐÃ KIỂM: ngày của Thời gian tạo = Thời gian ở mọi đơn
+      status: "Trạng thái"
+      customer_id: "Mã KH"
+      customer_name: "Khách hàng"
+      payment_method: "Phương thức thanh toán"   # Tiền mặt / Chuyển khoản / Ví điện tử / Thu hộ (COD) / Ghi nợ
+      order_subtotal: "Tổng tiền hàng"
+      order_discount: "Giảm giá"
+      order_payable: "Tổng sau giảm giá"
+
+  order_lines:
+    sources:
+      - {file: DanhSachHoaDonChiTiet_1.xlsx, sheet: Sheet1, header_row: 3}  # danh sách dài tách 2 file
+      - {file: DanhSachHoaDonChiTiet_2.xlsx, sheet: Sheet1, header_row: 3}
+    columns:
+      order_id: "Mã hóa đơn"
+      line_no: "STT"
+      product_id: "Mã hàng"
+      product_name: "Tên hàng"        # 62 cách viết cho 50 mã (ví dụ "BÁNH CROISSANT"): luôn dùng Mã hàng làm khoá
+      unit: "Đơn vị tính"
+      qty: "Số lượng"
+      unit_price: "Đơn giá"           # "45,000"
+      line_discount: "Giảm giá"
+      line_amount: "Thành tiền"
+      qty_base: "Số lượng quy đổi"
+      cost_per_unit: "Giá vốn"        # README: giá vốn một đơn vị bán
+
+  products:
+    sources:
+      - {file: DanhSachSanPham.xlsx, sheet: Sheet1, header_row: 1}
+    columns:
+      product_id: "Mã hàng"
+      product_name: "Tên hàng"
+      base_unit: "ĐVT"
+      category: "Nhóm hàng(3 Cấp)"
+      unit_cost: "Giá vốn"
+
+  unit_conversions:
+    sources:
+      - {file: DanhSachDonViTinh.xlsx, sheet: Sheet1, header_row: 1}
+    columns:
+      product_id: "Mã hàng"
+      unit: "ĐVT"
+      factor: "Quy đổi"
+    # 2 dòng: SP0049, SP0050: 1 hộp = 6 (đơn vị cơ bản lấy ở danh mục)
+
+  customers:
+    sources:
+      - {file: DanhSachKhachHang.xlsx, sheet: Sheet1, header_row: 1}
+    columns:
+      customer_id: "Mã khách hàng"
+      customer_name: "Tên khách hàng"  # có lúc kèm số điện thoại: "Đào Dương Giang - 0912 365 003"
+
+notes:
+  - "README gần như không có từ điển cột: đây là ca khó cho bước LLM gán cột."
+  - "QUAN TRỌNG (ĐÃ KIỂM): 3.230 dòng chi tiết lặp y hệt mọi cột. Rulebook §8: chỉ tính một lần."
+  - "ĐÃ KIỂM: sau khi bỏ dòng trùng, tổng Thành tiền các dòng = Tổng tiền hàng của đơn ở 100% đơn. Đây là phép kiểm tra mapping (và phát hiện dòng trùng) rất tốt."
+  - "ĐÃ KIỂM doanh thu tháng 2/2025: khớp đáp án."
+  - "SoQuy.xlsx (phiếu thu), DanhSachNhapHang / DanhSachChiTietNhapHang (nhập hàng), BaoCaoTonKho (tồn): chưa cần cho POC."

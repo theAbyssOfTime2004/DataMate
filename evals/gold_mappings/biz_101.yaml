@@ -1,0 +1,47 @@
+business_id: biz_101
+status: verified          # 2026-10-27, user reviewed
+format_family: csv_flat               # CSV phẳng, mỗi dòng một dòng hàng
+data_end_date: 2026-08-24             # README
+customer_identity: by_name            # không có mã khách
+walk_in_values: ["Khách lẻ"]          # ĐÃ KIỂM: cột Đối tác, 261 giá trị khác nhau, chỉ thấy "Khách lẻ"
+return_rule: status                   # không có dòng số lượng âm; trả hàng ghi ở trạng thái
+
+status_map:                           # ĐÃ KIỂM: cột "Kết quả" có đúng 4 giá trị
+  "Xong": completed
+  "Đã hủy": cancelled
+  "Đổi trả": returned
+  "Đang giao": shipping
+
+tables:
+  order_lines:
+    sources:
+      - {file: ban_hang.csv, sheet: null, header_row: 1}
+    columns:
+      order_id: "Mã hóa đơn"
+      product_name: "Nội dung"
+      qty: "so_luong"
+      unit: "Đơn vị (tính)"
+      qty_base: "Quy ra ĐV lẻ"
+      unit_price: "Giá bán"           # "10,000": dấu phẩy là phân cách nghìn
+      line_amount: "Thanh tien"       # "thành tiền sau giảm" (README)
+
+  orders:
+    derived_from: order_lines         # file phẳng: thông tin đơn lặp lại trên mỗi dòng, lấy theo order_id
+    columns:
+      order_id: "Mã hóa đơn"
+      order_date: "Ngày tháng"        # dạng "25 thg 2 2026"
+      status: "Kết quả"
+      customer_name: "Đối tác"
+    # không có giờ đặt đơn → order_ts trống (câu hỏi ca sáng/chiều sẽ không trả lời được)
+
+  unit_conversions:
+    source: readme                    # hệ số quy đổi ghi trong README, mục "Quy đổi đơn vị"
+    # ví dụ: "Coca Cola 330ml: 1 lốc = 6 lon", "Gạo ST25: 1 bao 25kg = 25 kg"
+    # đơn vị không có dòng quy đổi là đơn vị cơ bản, hệ số 1 (rulebook §10)
+
+notes:
+  - "Không có mã hàng: product_id = product_name."
+  - "Đơn vị có dạng nhiều chữ: 'bao 25kg', 'hộp 30' là đơn vị riêng, khác 'bao', 'hộp'."
+  - "ĐÃ KIỂM: Ngày tháng chỉ có một dạng 'd thg m yyyy' trên cả 56.501 dòng."
+  - "ĐÃ KIỂM: không có dòng nào lặp y hệt."
+  - "ĐÃ KIỂM doanh thu (đơn Xong + Đang giao, cộng Thanh tien, theo Ngày tháng): tháng 1, 3, 7/2026 khớp đáp án 3/3."

@@ -1,0 +1,82 @@
+business_id: biz_123
+status: verified          # 2026-10-27, user reviewed
+format_family: pos_sqlite             # SQLite máy POS, nhà thuốc
+data_end_date: 2026-06-28             # README
+customer_identity: by_code
+walk_in_values: [""]                  # MaKhachHang trống ở 13.544 đơn
+return_rule: status                   # TinhTrang = returned; bảng tra_hang có 273 phiếu, khớp 273 đơn returned
+
+status_map:                           # ĐÃ KIỂM: cột TinhTrang có đúng 4 giá trị
+  "completed": completed
+  "cancelled": cancelled
+  "returned": returned
+  "shipping": shipping
+
+tables:
+  orders:
+    sources:
+      - {file: pos.sqlite, sheet: don_hang, header_row: 1}   # với sqlite, "sheet" là tên bảng
+    columns:
+      order_id: "MaHoaDon"
+      order_date: "NgayLap"           # lẫn 3 dạng: "03/03/2025", serial Excel "45904", "1 thg 1 2025". ĐÃ KIỂM: luôn trùng ngày của ThoiGianLap
+      order_ts: "ThoiGianLap"         # "2025-01-16 19:52:39"
+      status: "TinhTrang"
+      customer_id: "MaKhachHang"
+      employee_id: "MaNhanVien"
+      channel: "KenhBanHang"
+      payment_method: "PhuongThucTT"
+      order_subtotal: "TongTienHang"
+      order_discount: "ChietKhau"     # khuyến mãi cả đơn (KM01), không trừ khi tính doanh thu
+      shipping_fee: "PhiVanChuyen"
+      order_payable: "TongThanhToan"
+
+  order_lines:
+    sources:
+      - {file: pos.sqlite, sheet: chi_tiet_don, header_row: 1}
+    join:
+      product_name: {table: products, on: {product_id: product_id}}
+    columns:
+      order_id: "MaHoaDon"
+      line_no: "SoThuTu"
+      product_id: "MaHangHoa"
+      unit: "DonViTinh"
+      qty: "SL"
+      qty_base: "SLQuyDoi"
+      unit_price: "GiaDonVi"
+      line_discount: "ChietKhau"
+      line_amount: "TriGia"           # README: thành tiền dòng, đã trừ giảm giá dòng
+      cost_per_unit: "GiaVonLucBan"
+
+  products:
+    sources:
+      - {file: pos.sqlite, sheet: san_pham, header_row: 1}
+    columns:
+      product_id: "MaHangHoa"
+      product_name: "TenGoi"
+      base_unit: "DonViCoSo"
+      category: "DanhMuc"
+      unit_cost: "GiaVonHang"
+
+  unit_conversions:
+    sources:
+      - {file: pos.sqlite, sheet: don_vi_sp, header_row: 1}
+    columns:
+      product_id: "MaHangHoa"
+      unit: "DonViTinh"
+      factor: "HeSoQuyDoi"
+
+  customers:
+    sources:
+      - {file: pos.sqlite, sheet: khach_hang, header_row: 1}
+    columns:
+      customer_id: "MaKhachHang"
+      customer_name: "TenGoi"
+      segment: "LoaiKhachHang"
+
+notes:
+  - "QUAN TRỌNG (ĐÃ KIỂM): 1.208 dòng chi_tiet_don lặp y hệt mọi cột trong cùng một đơn (1.196 đơn). Rulebook §8: lỗi xuất file, chỉ tính một lần. Không bỏ trùng: doanh thu tháng 10/2025 = 205.997.400 (SAI). Bỏ trùng: 202.375.900 = đáp án."
+  - "Cột IDCuaHang ở mọi bảng luôn bằng 'biz_123': bỏ qua, không dùng làm logic."
+  - "Bảng tra_hang có ngày trả (NgayGioTra) riêng: trạng thái trả hàng lấy theo đơn (rulebook đầu file), kể cả khi phiếu trả ghi sau hôm nay."
+  - "ThueGTGT luôn 0. Doanh thu = tổng TriGia, không trừ ChietKhau của đơn, không cộng PhiVanChuyen."
+  - "Bảng the_kho, lo_hang, chi_tiet_don_lo, thong_tin_thuoc, lich_su_gia, phieu_nhap: chưa cần cho POC."
+  - "ĐÃ KIỂM: sau khi bỏ dòng trùng, TongTienHang = tổng TriGia ở 100% đơn; chưa bỏ trùng thì lệch ở đúng 1.196 đơn có dòng trùng."

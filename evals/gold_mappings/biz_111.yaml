@@ -1,0 +1,69 @@
+business_id: biz_111
+status: verified          # 2026-10-27, user reviewed
+format_family: csv_relational         # nhiều CSV nối với nhau qua mã
+data_end_date: 2026-08-19             # README
+customer_identity: by_code            # có mã khách (Số KH)
+walk_in_values: [""]                  # README: Số KH trống nếu khách lẻ (26.734 đơn)
+return_rule: status
+
+status_map:                           # ĐÃ KIỂM: cột "Xử lý" có đúng 4 giá trị
+  "completed": completed
+  "cancelled": cancelled
+  "returned": returned
+  "shipping": shipping
+
+tables:
+  orders:
+    sources:
+      - {file: don_hang.csv, sheet: null, header_row: 1}
+    columns:
+      order_id: "Mã chứng từ"
+      order_date: "NgayBan"           # ĐÃ KIỂM: lẫn 3 dạng: "12/07/2026", serial Excel "45904", "19 thg 8 2026"
+      status: "Xử lý"
+      customer_id: "Số KH"
+      channel: "Bán qua"              # store / zalo_oa / phone
+      payment_method: "Phương thức TT"   # cash / transfer / ewallet / cod / debt
+      order_payable: "Tổng bill"
+    # không có giờ đặt đơn → order_ts trống
+
+  order_lines:
+    sources:
+      - {file: chi_tiet_don.csv, sheet: null, header_row: 1}
+    join:
+      product_name: {table: products, on: {product_id: product_id}}   # dòng hàng chỉ có mã, tên lấy ở danh mục
+    columns:
+      order_id: "Ma don"
+      line_no: "Thứ tự"
+      product_id: "ID SP"
+      qty: "SL"                       # có lúc dính đơn vị: "1 ly", "2 phần", "1 hộp"
+      unit: "Đơn vị (tính)"
+      qty_base: "SL quy đổi"
+      unit_price: "Giá đơn vị"
+      line_amount: "T.Tiền"           # thành tiền sau giảm
+
+  products:
+    sources:
+      - {file: san_pham.csv, sheet: null, header_row: 1}
+    columns:
+      product_id: "SKU"
+      product_name: "Sản phẩm"
+      base_unit: "Đơn vị"
+      category: "Nhom hang"
+
+  unit_conversions:
+    source: readme                    # "Bánh croissant: 1 hộp = 6 cái", "Bánh tiramisu: 1 hộp = 6 cái"
+
+  customers:
+    sources:
+      - {file: khach_hang.csv, sheet: null, header_row: 1}
+    columns:
+      customer_id: "ma_kh"
+      customer_name: "Khách lẻ/sỉ"    # tên cột gây nhầm: đây là TÊN khách, có lúc kèm số điện thoại
+      segment: "Nhóm"                 # lẻ / thân thiết / sỉ
+
+notes:
+  - "Bẫy: cột tên khách tên là 'Khách lẻ/sỉ', còn nhóm khách 'lẻ' là một segment, KHÔNG phải khách vãng lai (rulebook §1: đơn không ghi khách mới là vãng lai)."
+  - "Doanh thu tính từ T.Tiền của chi_tiet_don, không dùng Tổng bill (Tổng bill đã gồm giảm giá đơn và phí giao)."
+  - "thanh_toan.csv (các lần trả tiền): chưa cần cho POC; cần cho công nợ."
+  - "ĐÃ KIỂM doanh thu (đơn completed + shipping, cộng T.Tiền, theo NgayBan): 2/2 tháng khớp đáp án."
+  - "ĐÃ KIỂM: không có dòng chi_tiet_don nào lặp y hệt."

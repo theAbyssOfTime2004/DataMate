@@ -1,0 +1,70 @@
+business_id: biz_105
+status: verified          # 2026-10-27, user reviewed
+format_family: handwritten_monthly_sheets   # sổ ghi tay, mỗi tháng một sheet
+data_end_date: 2026-06-24             # README
+customer_identity: by_name            # không có mã khách
+walk_in_values: ["Khách lẻ"]          # ĐÃ KIỂM: mọi sheet, chỉ có đúng cách viết này
+return_rule: negative_qty             # README: đơn có dòng số lượng âm là đơn có trả hàng
+
+status_map:                           # ĐÃ KIỂM: hợp mọi giá trị của cột Status trên cả 17 sheet
+  "đã lấy": completed
+  "đã xong": completed
+  "hủy": cancelled
+  "Đã hủy đơn": cancelled
+  "Đổi trả": returned
+  "Trả hàng": returned
+  "hàng trả về": returned
+  "Hoàn trả": returned
+  "Đang giao": shipping
+  "Đang giao hàng": shipping
+  # ĐÃ KIỂM: không đơn nào có hai trạng thái khác nhau giữa các dòng (86.142 đơn)
+  # ĐÃ KIỂM: mọi dòng số lượng âm đều mang trạng thái nhóm returned
+
+tables:
+  order_lines:
+    sources:
+      - {file: SoBanHang_1.xlsx, sheet: "*", header_row: 2}     # 12 sheet: Thang 02 2025 → Thang 01 2026
+      - {file: SoBanHang_2026.xlsx, sheet: "*", header_row: 2}  # 5 sheet: Thang 02 2026 → Thang 06 2026
+    row_filter: "bỏ dòng không có Mã hóa đơn (dòng 'Cộng' và 'Ghi chú: tiền tính bằng đồng' ở cuối mỗi sheet)"
+    columns:
+      order_id: "Mã hóa đơn"
+      product_name: "Hàng"
+      qty: "so_luong"                 # có số âm ở dòng trả hàng
+      unit: "Unit"
+      unit_price: "Giá lẻ"            # "45.000đ" và "25k" lẫn nhau
+      line_amount: "Trị giá"          # thành tiền sau giảm; dạng "45.000đ"
+
+  orders:
+    derived_from: order_lines
+    columns:
+      order_id: "Mã hóa đơn"
+      order_date: "Ngày giao dịch"    # lẫn số serial Excel (45704) và "15/02/2025"
+      order_ts: "Giờ"                 # số serial Excel gồm cả ngày lẫn giờ (45689.2502...)
+      status: "Status"
+      customer_name: "Khách"
+
+  unit_conversions:
+    sources:
+      - {file: DanhMuc.xlsx, sheet: Sheet1, header_row: 1}
+    columns:
+      product_name: "Tên món"
+      base_unit: "Đơn vị gốc"
+      unit: "ĐV nhập"
+      factor: "Hệ số"
+    # chỉ 2 dòng: Bánh croissant, Bánh tiramisu: 1 hộp = 6 cái
+
+  products:
+    sources:
+      - {file: TonKho.xlsx, sheet: Sheet1, header_row: 1}
+    columns:
+      product_name: "Hàng hóa"
+      base_unit: "Đơn vị tính"
+
+notes:
+  - "Dòng 1 của mỗi sheet là header nhóm 'Hàng | Tiền | Đơn'; header thật ở dòng 2."
+  - "QUAN TRỌNG: ở dòng trả hàng (số lượng âm), cột Giờ là LÚC TRẢ (README) và Ngày giao dịch cũng bằng ngày trả (ĐÃ KIỂM: 355/355 dòng âm, Ngày giao dịch = ngày của Giờ). Ngày đặt và giờ đặt của đơn phải lấy từ các dòng số lượng dương."
+  - "ĐÃ KIỂM: 48 đơn có dòng trả hàng nằm ở sheet khác với sheet của đơn gốc (sheet của tháng trả). Phải gộp mọi sheet trước khi nhóm theo order_id."
+  - "QUAN TRỌNG (ĐÃ KIỂM): 2.222 dòng lặp y hệt mọi cột trong cùng đơn. Rulebook §8: chỉ tính một lần."
+  - "ĐÃ KIỂM doanh thu (bỏ dòng trùng; đơn trạng thái completed/shipping, không có dòng âm; cộng Trị giá; ngày đặt từ dòng dương): 4/4 tháng khớp đáp án."
+  - "Không có mã hàng: product_id = product_name."
+  - "Có thêm SoNhapHang.xlsx (phiếu nhập) và BangGia.xlsx (lịch sử giá): chưa cần cho POC."
