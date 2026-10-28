@@ -214,14 +214,19 @@ def _build_products(
         return _records_to_df([], PRODUCTS_COLUMNS)
 
     cols = tm.columns
+    c_pid = cols.get("product_id")
+    c_pname = cols.get("product_name")
+    c_bunit = cols.get("base_unit")
+    c_cat = cols.get("category")
+    c_ucost = cols.get("unit_cost")
+
     rows: list[dict[str, Any]] = []
-    for idx in range(len(df)):
-        row = df.iloc[idx]
-        pid_raw = row[cols["product_id"]] if "product_id" in cols else None
-        pname_raw = row[cols["product_name"]] if "product_name" in cols else None
-        bunit_raw = row[cols["base_unit"]] if "base_unit" in cols else None
-        cat_raw = row[cols["category"]] if "category" in cols else None
-        ucost_raw = row[cols["unit_cost"]] if "unit_cost" in cols else None
+    for row in df.to_dict("records"):
+        pid_raw = row[c_pid] if c_pid is not None else None
+        pname_raw = row[c_pname] if c_pname is not None else None
+        bunit_raw = row[c_bunit] if c_bunit is not None else None
+        cat_raw = row[c_cat] if c_cat is not None else None
+        ucost_raw = row[c_ucost] if c_ucost is not None else None
 
         pid = _strip_str(pid_raw)
         tracker.record("products.product_id", pid_raw, pid is not None)
@@ -265,12 +270,15 @@ def _build_customers(
         return _records_to_df([], CUSTOMERS_COLUMNS)
 
     cols = tm.columns
+    c_cid = cols.get("customer_id")
+    c_cname = cols.get("customer_name")
+    c_seg = cols.get("segment")
+
     rows: list[dict[str, Any]] = []
-    for idx in range(len(df)):
-        row = df.iloc[idx]
-        cid_raw = row[cols["customer_id"]] if "customer_id" in cols else None
-        cname_raw = row[cols["customer_name"]] if "customer_name" in cols else None
-        seg_raw = row[cols["segment"]] if "segment" in cols else None
+    for row in df.to_dict("records"):
+        cid_raw = row[c_cid] if c_cid is not None else None
+        cname_raw = row[c_cname] if c_cname is not None else None
+        seg_raw = row[c_seg] if c_seg is not None else None
 
         cid = _strip_str(cid_raw)
         tracker.record("customers.customer_id", cid_raw, cid is not None)
@@ -318,14 +326,19 @@ def _build_unit_conversions(
         return _records_to_df([], UNIT_CONVERSIONS_COLUMNS)
 
     cols = tm.columns
+    c_pid = cols.get("product_id")
+    c_pname = cols.get("product_name")
+    c_unit = cols.get("unit")
+    c_bunit = cols.get("base_unit")
+    c_factor = cols.get("factor")
+
     rows: list[dict[str, Any]] = []
-    for idx in range(len(df)):
-        row = df.iloc[idx]
-        pid_raw = row[cols["product_id"]] if "product_id" in cols else None
-        pname_raw = row[cols["product_name"]] if "product_name" in cols else None
-        unit_raw = row[cols["unit"]] if "unit" in cols else None
-        bunit_raw = row[cols["base_unit"]] if "base_unit" in cols else None
-        factor_raw = row[cols["factor"]] if "factor" in cols else None
+    for row in df.to_dict("records"):
+        pid_raw = row[c_pid] if c_pid is not None else None
+        pname_raw = row[c_pname] if c_pname is not None else None
+        unit_raw = row[c_unit] if c_unit is not None else None
+        bunit_raw = row[c_bunit] if c_bunit is not None else None
+        factor_raw = row[c_factor] if c_factor is not None else None
 
         pid = _strip_str(pid_raw)
         tracker.record("unit_conversions.product_id", pid_raw, pid is not None)
@@ -367,26 +380,30 @@ def _apply_joins(
         if source_field not in target_df.columns:
             continue
 
-        # Build lookup index from target_df
         local_keys = list(jspec.on.keys())
         remote_keys = [jspec.on[k] for k in local_keys]
         if any(rk not in target_df.columns for rk in remote_keys):
             continue
 
         lookup: dict[tuple[Any, ...], Any] = {}
-        for t_idx in range(len(target_df)):
-            t_row = target_df.iloc[t_idx]
+        for t_row in target_df.to_dict("records"):
             val = t_row[source_field]
             if val is None or (isinstance(val, float) and pd.isna(val)):
                 continue
-            key_tuple = tuple(_strip_str(str(t_row[rk])) if t_row[rk] is not None else None for rk in remote_keys)
+            key_tuple = tuple(
+                _strip_str(str(t_row[rk])) if t_row[rk] is not None else None
+                for rk in remote_keys
+            )
             if all(k is not None for k in key_tuple) and key_tuple not in lookup:
                 lookup[key_tuple] = val
 
         for r in rows:
             if r.get(target_field) is not None:
                 continue
-            l_tuple = tuple(_strip_str(str(r.get(lk))) if r.get(lk) is not None else None for lk in local_keys)
+            l_tuple = tuple(
+                _strip_str(str(r.get(lk))) if r.get(lk) is not None else None
+                for lk in local_keys
+            )
             if all(k is not None for k in l_tuple) and l_tuple in lookup:
                 r[target_field] = lookup[l_tuple]
 
@@ -440,7 +457,6 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
         raise MappingError("Entity 'order_lines' must map canonical field 'order_id'")
     order_id_raw_col = lines_tm.columns["order_id"]
 
-    # Map from raw order-level column -> list of canonical order fields using it
     order_level_raw_cols: dict[str, list[str]] = {}
     if orders_tm.derived_from == "order_lines":
         for o_field, o_raw_col in orders_tm.columns.items():
@@ -451,6 +467,7 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
     # Step (c) and (d): per (__file, __sheet) block forward-fill and exact pre-fill dedupe
     kept_line_records: list[dict[str, Any]] = []
     seen_in_order_by_table: dict[str, set[tuple[str, tuple[str | None, ...]]]] = {}
+    is_derived_orders = orders_tm.derived_from == "order_lines"
 
     for chunk in line_chunks:
         rt = chunk.raw_table
@@ -461,14 +478,13 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
 
         seen_set = seen_in_order_by_table.setdefault(rt.name, set())
 
-        # Group contiguous or same (__file, __sheet) blocks in source order
         prev_file: str | None = None
         prev_sheet: str | None = None
         prev_order_id: str | None = None
+        prev_order_id_clean: str | None = None
         prev_order_raw_vals: dict[str, str | None] = {}
 
-        for r_idx in range(len(chunk_df)):
-            s_row = chunk_df.iloc[r_idx]
+        for s_row in chunk_df.to_dict("records"):
             cur_file = s_row["__file"]
             cur_sheet = s_row["__sheet"]
             cur_row_no = int(s_row["__row"])
@@ -477,52 +493,59 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
                 prev_file = cur_file
                 prev_sheet = cur_sheet
                 prev_order_id = None
+                prev_order_id_clean = None
                 prev_order_raw_vals = {}
 
-            # Pre-fill snapshot across ALL raw data columns of this source table
             pre_fill_tuple = tuple(
                 s_row[c] if isinstance(s_row[c], str) else None for c in rt_data_cols
             )
 
-            raw_oid_cell = s_row[order_id_raw_col] if isinstance(s_row[order_id_raw_col], str) else None
+            raw_oid_val = s_row[order_id_raw_col]
+            raw_oid_cell = raw_oid_val if isinstance(raw_oid_val, str) else None
             if raw_oid_cell is None and prev_order_id is not None:
                 resolved_oid_raw: str | None = prev_order_id
+                oid_clean: str | None = prev_order_id_clean
                 fill_counts["order_id"] += 1
+                same_order_as_prev = True
             else:
                 resolved_oid_raw = raw_oid_cell
-
-            same_order_as_prev = (
-                resolved_oid_raw is not None
-                and prev_order_id is not None
-                and _strip_str(resolved_oid_raw) == _strip_str(prev_order_id)
-            )
+                oid_clean = _strip_str(resolved_oid_raw)
+                same_order_as_prev = (
+                    oid_clean is not None
+                    and prev_order_id_clean is not None
+                    and oid_clean == prev_order_id_clean
+                )
 
             filled_row_dict: dict[str, str | None] = {
                 c: (s_row[c] if isinstance(s_row[c], str) else None) for c in rt_data_cols
             }
             filled_row_dict[order_id_raw_col] = resolved_oid_raw
 
-            if orders_tm.derived_from == "order_lines":
+            if is_derived_orders and order_level_raw_cols:
                 for raw_col_name, canonical_o_fields in order_level_raw_cols.items():
                     if raw_col_name not in filled_row_dict:
                         continue
                     cell_val = filled_row_dict[raw_col_name]
-                    if cell_val is None and same_order_as_prev and prev_order_raw_vals.get(raw_col_name) is not None:
+                    if (
+                        cell_val is None
+                        and same_order_as_prev
+                        and prev_order_raw_vals.get(raw_col_name) is not None
+                    ):
                         filled_row_dict[raw_col_name] = prev_order_raw_vals[raw_col_name]
                         for cf in canonical_o_fields:
                             fill_counts[cf] += 1
 
-            # Update state for subsequent rows in the same (__file, __sheet)
             if resolved_oid_raw is not None:
                 if not same_order_as_prev:
                     prev_order_raw_vals = {}
                 prev_order_id = resolved_oid_raw
-                for raw_col_name in order_level_raw_cols:
-                    if filled_row_dict.get(raw_col_name) is not None:
-                        prev_order_raw_vals[raw_col_name] = filled_row_dict[raw_col_name]
+                prev_order_id_clean = oid_clean
+                if is_derived_orders and order_level_raw_cols:
+                    for raw_col_name in order_level_raw_cols:
+                        val_in_row = filled_row_dict.get(raw_col_name)
+                        if val_in_row is not None:
+                            prev_order_raw_vals[raw_col_name] = val_in_row
 
-            # Step (d): §8 dedupe within the same order on pre-fill values across all raw data columns
-            oid_clean = _strip_str(resolved_oid_raw)
             if oid_clean is not None:
                 dedupe_key = (oid_clean, pre_fill_tuple)
                 if dedupe_key in seen_set:
@@ -541,8 +564,22 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
 
     # Step (e), (f), (g): parse order_lines fields
     lcols = lines_tm.columns
+    c_l_oid = lcols.get("order_id")
+    c_l_lno = lcols.get("line_no")
+    c_l_pid = lcols.get("product_id")
+    c_l_pname = lcols.get("product_name")
+    c_l_qty = lcols.get("qty")
+    c_l_unit = lcols.get("unit")
+    c_l_qbase = lcols.get("qty_base")
+    c_l_uprice = lcols.get("unit_price")
+    c_l_ldisc = lcols.get("line_discount")
+    c_l_lamt = lcols.get("line_amount")
+    c_l_cpu = lcols.get("cost_per_unit")
+
     parsed_lines: list[dict[str, Any]] = []
-    raw_lines_for_derived_orders: list[tuple[str, str | None, str, Decimal | None, dict[str, str | None]]] = []
+    raw_lines_for_derived_orders: list[
+        tuple[str, str | None, str, Decimal | None, dict[str, str | None]]
+    ] = []
 
     for rec in kept_line_records:
         f_name: str = rec["__file"]
@@ -550,54 +587,54 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
         r_no: int = rec["__row"]
         rdict: dict[str, str | None] = rec["raw"]
 
-        oid_raw = rdict.get(lcols["order_id"]) if "order_id" in lcols else None
+        oid_raw = rdict.get(c_l_oid) if c_l_oid is not None else None
         oid = _strip_str(oid_raw)
         tracker.record("order_lines.order_id", oid_raw, oid is not None)
 
-        lno_raw = rdict.get(lcols["line_no"]) if "line_no" in lcols else None
+        lno_raw = rdict.get(c_l_lno) if c_l_lno is not None else None
         lno = _parse_int_id(lno_raw) if lno_raw is not None else None
         tracker.record("order_lines.line_no", lno_raw, lno is not None)
 
-        pid_raw = rdict.get(lcols["product_id"]) if "product_id" in lcols else None
+        pid_raw = rdict.get(c_l_pid) if c_l_pid is not None else None
         pid = _strip_str(pid_raw)
         tracker.record("order_lines.product_id", pid_raw, pid is not None)
 
-        pname_raw = rdict.get(lcols["product_name"]) if "product_name" in lcols else None
+        pname_raw = rdict.get(c_l_pname) if c_l_pname is not None else None
         pname = _strip_str(pname_raw)
         tracker.record("order_lines.product_name", pname_raw, pname is not None)
 
-        qty_raw = rdict.get(lcols["qty"]) if "qty" in lcols else None
+        qty_raw = rdict.get(c_l_qty) if c_l_qty is not None else None
         qty_parsed = parse_qty(qty_raw)
         qty_val: Decimal | None = qty_parsed[0] if qty_parsed is not None else None
         qty_embedded_unit: str | None = qty_parsed[1] if qty_parsed is not None else None
         tracker.record("order_lines.qty", qty_raw, qty_val is not None)
 
-        unit_raw = rdict.get(lcols["unit"]) if "unit" in lcols else None
+        unit_raw = rdict.get(c_l_unit) if c_l_unit is not None else None
         unit_col_val = _strip_str(unit_raw)
-        if "unit" in lcols:
+        if c_l_unit is not None:
             tracker.record("order_lines.unit", unit_raw, unit_col_val is not None)
         unit_val = unit_col_val if unit_col_val is not None else qty_embedded_unit
 
-        qbase_raw = rdict.get(lcols["qty_base"]) if "qty_base" in lcols else None
+        qbase_raw = rdict.get(c_l_qbase) if c_l_qbase is not None else None
         qbase_parsed = parse_qty(qbase_raw)
         qbase_val: Decimal | None = (
             qbase_parsed[0] if qbase_parsed is not None else parse_decimal(qbase_raw)
         )
         tracker.record("order_lines.qty_base", qbase_raw, qbase_val is not None)
 
-        uprice_raw = rdict.get(lcols["unit_price"]) if "unit_price" in lcols else None
+        uprice_raw = rdict.get(c_l_uprice) if c_l_uprice is not None else None
         uprice_val = parse_money(uprice_raw)
         tracker.record("order_lines.unit_price", uprice_raw, uprice_val is not None)
 
-        ldisc_raw = rdict.get(lcols["line_discount"]) if "line_discount" in lcols else None
+        ldisc_raw = rdict.get(c_l_ldisc) if c_l_ldisc is not None else None
         ldisc_val = parse_money(ldisc_raw)
         tracker.record("order_lines.line_discount", ldisc_raw, ldisc_val is not None)
 
-        lamt_raw = rdict.get(lcols["line_amount"]) if "line_amount" in lcols else None
+        lamt_raw = rdict.get(c_l_lamt) if c_l_lamt is not None else None
         lamt_val = parse_money(lamt_raw)
         tracker.record("order_lines.line_amount", lamt_raw, lamt_val is not None)
 
-        cpu_raw = rdict.get(lcols["cost_per_unit"]) if "cost_per_unit" in lcols else None
+        cpu_raw = rdict.get(c_l_cpu) if c_l_cpu is not None else None
         cpu_val = parse_money(cpu_raw)
         tracker.record("order_lines.cost_per_unit", cpu_raw, cpu_val is not None)
 
@@ -621,7 +658,7 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
                 "src_row": r_no,
             }
         )
-        if oid is not None:
+        if is_derived_orders and oid is not None:
             raw_lines_for_derived_orders.append((oid, s_name, f_name, qty_val, rdict))
 
     # Step (f): joins on order_lines
@@ -660,10 +697,19 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
     status_overridden_by_return = 0
     order_rows: list[dict[str, Any]] = []
 
-    if orders_tm.derived_from == "order_lines":
+    year_hint_cache: dict[tuple[str | None, str], int | None] = {}
+
+    def _cached_year_hint(s_name: str | None, f_name: str) -> int | None:
+        key = (s_name, f_name)
+        if key not in year_hint_cache:
+            year_hint_cache[key] = year_hint(s_name, f_name)
+        return year_hint_cache[key]
+
+    if is_derived_orders:
         ocols = orders_tm.columns
-        # Group lines by order_id preserving order of appearance
-        lines_by_oid: dict[str, list[tuple[str | None, str, Decimal | None, dict[str, str | None]]]] = {}
+        lines_by_oid: dict[
+            str, list[tuple[str | None, str, Decimal | None, dict[str, str | None]]]
+        ] = {}
         for oid, s_name, f_name, qty_val, rdict in raw_lines_for_derived_orders:
             lines_by_oid.setdefault(oid, []).append((s_name, f_name, qty_val, rdict))
 
@@ -672,27 +718,23 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
             raw_val: str | None,
             s_name: str | None,
             f_name: str,
-            record_stat: bool = True,
         ) -> Any:
             if raw_val is None:
                 return None
             if field_name == "order_date":
-                val = parse_date(raw_val, default_year=year_hint(s_name, f_name))
-                if record_stat:
-                    tracker.record("orders.order_date", raw_val, val is not None)
+                val = parse_date(raw_val, default_year=_cached_year_hint(s_name, f_name))
+                tracker.record("orders.order_date", raw_val, val is not None)
                 return val
             if field_name == "order_ts":
-                val_ts = parse_timestamp(raw_val, default_year=year_hint(s_name, f_name))
-                if record_stat:
-                    tracker.record("orders.order_ts", raw_val, val_ts is not None)
+                val_ts = parse_timestamp(raw_val, default_year=_cached_year_hint(s_name, f_name))
+                tracker.record("orders.order_ts", raw_val, val_ts is not None)
                 return val_ts
             if field_name in {"order_subtotal", "order_discount", "shipping_fee", "order_payable"}:
                 val_m = parse_money(raw_val)
-                if record_stat:
-                    tracker.record(f"orders.{field_name}", raw_val, val_m is not None)
+                tracker.record(f"orders.{field_name}", raw_val, val_m is not None)
                 return val_m
             val_s = _strip_str(raw_val)
-            if record_stat:
+            if field_name != "status":
                 tracker.record(f"orders.{field_name}", raw_val, val_s is not None)
             return val_s
 
@@ -710,23 +752,19 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
             "shipping_fee",
             "order_payable",
         ]
+        active_derived_fields = [f for f in derived_fields if f in ocols]
 
         for oid, o_lines in lines_by_oid.items():
             tracker.record("orders.order_id", oid, True)
 
-            resolved_fields: dict[str, Any] = {}
-            for fname in derived_fields:
-                if fname not in ocols:
-                    resolved_fields[fname] = None
-                    continue
+            resolved_fields: dict[str, Any] = {f: None for f in derived_fields}
+            for fname in active_derived_fields:
                 raw_col = ocols[fname]
-
-                # Record parse stats across all lines of the order, and collect non-null parsed values on non-neg lines
                 non_neg_vals: list[Any] = []
                 any_vals: list[Any] = []
                 for s_name, f_name, qty_val, rdict in o_lines:
                     rv = rdict.get(raw_col)
-                    pv = _parse_order_field(fname, rv, s_name, f_name, record_stat=True)
+                    pv = _parse_order_field(fname, rv, s_name, f_name)
                     if pv is not None:
                         any_vals.append(pv)
                         if qty_val is None or qty_val >= 0:
@@ -750,6 +788,8 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
                 mapped_status = norm_status_map.get(norm_st)
                 if mapped_status is None:
                     unmapped_statuses[status_raw] += 1
+            if "status" in ocols:
+                tracker.record("orders.status", status_raw, mapped_status is not None)
 
             has_ret = (mapped_status == "returned") or (
                 mapping.return_rule == "negative_qty" and oid in orders_with_negative_qty
@@ -787,27 +827,39 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
         order_chunks = _resolve_sources(raw, "orders", orders_tm.sources, warnings)
         _validate_mapped_columns("orders", orders_tm, order_chunks)
         ocols = orders_tm.columns
+        c_o_oid = ocols.get("order_id")
+        c_o_date = ocols.get("order_date")
+        c_o_ts = ocols.get("order_ts")
+        c_o_st = ocols.get("status")
+        c_o_cid = ocols.get("customer_id")
+        c_o_cname = ocols.get("customer_name")
+        c_o_pm = ocols.get("payment_method")
+        c_o_ch = ocols.get("channel")
+        c_o_emp = ocols.get("employee_id")
+        c_o_sub = ocols.get("order_subtotal")
+        c_o_disc = ocols.get("order_discount")
+        c_o_ship = ocols.get("shipping_fee")
+        c_o_pay = ocols.get("order_payable")
+
         for chunk in order_chunks:
-            cdf = chunk.df
-            for r_idx in range(len(cdf)):
-                s_row = cdf.iloc[r_idx]
+            for s_row in chunk.df.to_dict("records"):
                 f_name = s_row["__file"]
                 s_name = s_row["__sheet"]
-                yh = year_hint(s_name, f_name)
+                yh = _cached_year_hint(s_name, f_name)
 
-                oid_raw = s_row[ocols["order_id"]] if "order_id" in ocols else None
+                oid_raw = s_row[c_o_oid] if c_o_oid is not None else None
                 oid = _strip_str(oid_raw)
                 tracker.record("orders.order_id", oid_raw, oid is not None)
 
-                odate_raw = s_row[ocols["order_date"]] if "order_date" in ocols else None
+                odate_raw = s_row[c_o_date] if c_o_date is not None else None
                 odate = parse_date(odate_raw, default_year=yh)
                 tracker.record("orders.order_date", odate_raw, odate is not None)
 
-                ots_raw = s_row[ocols["order_ts"]] if "order_ts" in ocols else None
+                ots_raw = s_row[c_o_ts] if c_o_ts is not None else None
                 ots = parse_timestamp(ots_raw, default_year=yh)
                 tracker.record("orders.order_ts", ots_raw, ots is not None)
 
-                status_raw_cell = s_row[ocols["status"]] if "status" in ocols else None
+                status_raw_cell = s_row[c_o_st] if c_o_st is not None else None
                 status_raw = _strip_str(status_raw_cell)
                 norm_st = normalize_label(status_raw) if status_raw is not None else None
                 mapped_status = None
@@ -817,39 +869,39 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
                         unmapped_statuses[status_raw] += 1
                 tracker.record("orders.status", status_raw_cell, mapped_status is not None)
 
-                cid_raw = s_row[ocols["customer_id"]] if "customer_id" in ocols else None
+                cid_raw = s_row[c_o_cid] if c_o_cid is not None else None
                 cid = _strip_str(cid_raw)
                 tracker.record("orders.customer_id", cid_raw, cid is not None)
 
-                cname_raw = s_row[ocols["customer_name"]] if "customer_name" in ocols else None
+                cname_raw = s_row[c_o_cname] if c_o_cname is not None else None
                 cname = _strip_str(cname_raw)
                 tracker.record("orders.customer_name", cname_raw, cname is not None)
 
-                pm_raw = s_row[ocols["payment_method"]] if "payment_method" in ocols else None
+                pm_raw = s_row[c_o_pm] if c_o_pm is not None else None
                 pm = _strip_str(pm_raw)
                 tracker.record("orders.payment_method", pm_raw, pm is not None)
 
-                ch_raw = s_row[ocols["channel"]] if "channel" in ocols else None
+                ch_raw = s_row[c_o_ch] if c_o_ch is not None else None
                 ch = _strip_str(ch_raw)
                 tracker.record("orders.channel", ch_raw, ch is not None)
 
-                emp_raw = s_row[ocols["employee_id"]] if "employee_id" in ocols else None
+                emp_raw = s_row[c_o_emp] if c_o_emp is not None else None
                 emp = _strip_str(emp_raw)
                 tracker.record("orders.employee_id", emp_raw, emp is not None)
 
-                sub_raw = s_row[ocols["order_subtotal"]] if "order_subtotal" in ocols else None
+                sub_raw = s_row[c_o_sub] if c_o_sub is not None else None
                 sub_val = parse_money(sub_raw)
                 tracker.record("orders.order_subtotal", sub_raw, sub_val is not None)
 
-                disc_raw = s_row[ocols["order_discount"]] if "order_discount" in ocols else None
+                disc_raw = s_row[c_o_disc] if c_o_disc is not None else None
                 disc_val = parse_money(disc_raw)
                 tracker.record("orders.order_discount", disc_raw, disc_val is not None)
 
-                ship_raw = s_row[ocols["shipping_fee"]] if "shipping_fee" in ocols else None
+                ship_raw = s_row[c_o_ship] if c_o_ship is not None else None
                 ship_val = parse_money(ship_raw)
                 tracker.record("orders.shipping_fee", ship_raw, ship_val is not None)
 
-                pay_raw = s_row[ocols["order_payable"]] if "order_payable" in ocols else None
+                pay_raw = s_row[c_o_pay] if c_o_pay is not None else None
                 pay_val = parse_money(pay_raw)
                 tracker.record("orders.order_payable", pay_raw, pay_val is not None)
 
@@ -934,13 +986,6 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
     after_end = 0
     if mapping.data_end_date is not None:
         after_end = sum(1 for d in valid_dates if d > mapping.data_end_date)
-
-    # Also record orders.status parse stat for derived orders if status was mapped
-    if orders_tm.derived_from == "order_lines" and "status" in orders_tm.columns:
-        st_stat = tracker.stats.get("orders.status")
-        if st_stat is not None:
-            unmapped_total = sum(unmapped_statuses.values())
-            st_stat.parsed = max(0, st_stat.non_null - unmapped_total)
 
     final_parse_stats = tracker.finalize()
 

@@ -113,6 +113,12 @@ def test_flat_sheet_ffill_dedupe_return_date_and_year_hint(tmp_path: Path) -> No
     assert orders_by_id["ORD004"]["status"] is None
     assert canon.report.unmapped_statuses == {"chờ xác nhận": 1}
 
+    # orders.status parse stat for derived orders is counted per order (4 orders, 3 mapped)
+    st_stat = canon.report.parse_stats["orders.status"]
+    assert st_stat.non_null == 4
+    assert st_stat.parsed == 3
+    assert st_stat.examples == ["chờ xác nhận"]
+
 
 def test_separate_orders_and_lines_subtotal_and_orphan(tmp_path: Path) -> None:
     (tmp_path / "orders.csv").write_text(

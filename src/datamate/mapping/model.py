@@ -3,9 +3,10 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import re
 import unicodedata
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -64,6 +65,26 @@ CANONICAL_FIELDS: dict[Entity, set[str]] = {
         "segment",
     },
 }
+
+_BOOL_TAG = "tag:yaml.org,2002:bool"
+_STRICT_BOOL_RE = re.compile(r"^(?:true|false)$", re.IGNORECASE)
+
+
+class _StrictBoolSafeLoader(yaml.SafeLoader):
+    """YAML SafeLoader whose bool resolver only matches true/false (any case)."""
+
+    bool_values: ClassVar[dict[str, bool]] = {
+        "true": True,
+        "false": False,
+    }
+
+
+_StrictBoolSafeLoader.yaml_implicit_resolvers = {
+    ch: [(tag, regexp) for tag, regexp in resolvers if tag != _BOOL_TAG]
+    for ch, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+for _ch in ("t", "T", "f", "F"):
+    _StrictBoolSafeLoader.add_implicit_resolver(_BOOL_TAG, _STRICT_BOOL_RE, [_ch])
 
 
 def _nfc_str(val: str) -> str:
@@ -184,7 +205,10 @@ class Mapping(BaseModel):
 
 def load_mapping_yaml(path: Path | str) -> Mapping:
     p = Path(path)
-    raw: dict[str, Any] = yaml.safe_load(p.read_text(encoding="utf-8"))
+    raw: dict[str, Any] = yaml.load(
+        p.read_text(encoding="utf-8"),
+        Loader=_StrictBoolSafeLoader,
+    )
     return Mapping.model_validate(raw)
 
 

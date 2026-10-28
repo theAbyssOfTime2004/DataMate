@@ -15,7 +15,7 @@ from datamate.io.paths import business_dir
 from datamate.io.raw import _compute_business_cache_key, load_business_cached
 from datamate.mapping.model import Mapping, mapping_fingerprint
 
-ETL_VERSION = "1.0"
+ETL_VERSION = "1.1"
 
 _COLUMN_SQL_TYPES: dict[str, dict[str, str]] = {
     "orders": {

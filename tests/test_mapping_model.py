@@ -93,3 +93,51 @@ def test_missing_orders_or_order_lines_raises() -> None:
     del raw["tables"]["orders"]
     with pytest.raises(ValidationError, match="orders"):
         Mapping.model_validate(raw)
+
+
+def test_strict_bool_yaml_loader_preserves_on_yes_no_strings(tmp_path: Path) -> None:
+    yaml_text = """
+data_end_date: 2026-08-31
+customer_identity: by_name
+walk_in_values: [no]
+return_rule: status
+status_map:
+  Yes: completed
+  No: cancelled
+tables:
+  orders:
+    derived_from: order_lines
+    columns:
+      order_id: Mã đơn
+  order_lines:
+    sources:
+      - file: orders.csv
+        sheet: null
+        header_row: 1
+    join:
+      product_name:
+        table: products
+        on:
+          product_id: product_id
+    columns:
+      order_id: Mã đơn
+      product_id: Mã SP
+      qty: SL
+      line_amount: Thành tiền
+  products:
+    sources:
+      - file: products.csv
+        sheet: null
+        header_row: 1
+    columns:
+      product_id: Mã SP
+      product_name: Tên SP
+"""
+    yaml_file = tmp_path / "strict_bool.yaml"
+    yaml_file.write_text(yaml_text.strip(), encoding="utf-8")
+
+    m = load_mapping_yaml(yaml_file)
+    assert m.walk_in_values == ["no"]
+    assert m.status_map == {"Yes": "completed", "No": "cancelled"}
+    assert m.tables["order_lines"].join["product_name"].on == {"product_id": "product_id"}
+
