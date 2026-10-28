@@ -19,7 +19,7 @@ import pandas as pd
 from datamate.config import settings
 from datamate.io.paths import business_dir
 
-READER_VERSION = "1.1"
+READER_VERSION = "1.2"
 
 DropReason = Literal["title_or_filter", "summary", "repeated_header", "empty"]
 TableKind = Literal["csv", "xlsx", "sqlite"]
@@ -30,6 +30,14 @@ PROVENANCE_COLUMNS: tuple[str, str, str] = ("__file", "__sheet", "__row")
 _SUMMARY_DIACRITIC_RE = re.compile(r"^\s*(tổng|cộng|ghi chú|total|subtotal)\b", re.IGNORECASE)
 _SUMMARY_STRIPPED_RE = re.compile(
     r"^\s*(tong cong|tong ngay|tong thang|tong ky|cong ngay|cong thang|ghi chu\s*:)",
+    re.IGNORECASE,
+)
+_SUMMARY_ANY_CELLS_DIACRITIC_RE = re.compile(
+    r"^\s*(tổng cộng|tổng|cộng)(\s+(ngày|tháng|kỳ|ca|tuần|năm)\b|\s+\d|\s*:?\s*$)",
+    re.IGNORECASE,
+)
+_SUMMARY_ANY_CELLS_STRIPPED_RE = re.compile(
+    r"^\s*(tong cong|tong ngay|tong thang|cong ngay|cong thang)\b",
     re.IGNORECASE,
 )
 _NUMBER_OR_MONEY_RE = re.compile(
@@ -167,17 +175,29 @@ def _is_header_text_cell(cell: str) -> bool:
 
 
 def _is_summary_cell(cell: str) -> bool:
-    nfc_lower = unicodedata.normalize("NFC", cell).lower()
+    nfc_lower = " ".join(unicodedata.normalize("NFC", cell).lower().split())
     if _SUMMARY_DIACRITIC_RE.match(nfc_lower) is not None:
         return True
-    stripped = " ".join(_strip_accents(nfc_lower).split())
-    return _SUMMARY_STRIPPED_RE.match(stripped) is not None
+    stripped = _strip_accents(nfc_lower)
+    m = _SUMMARY_STRIPPED_RE.match(stripped)
+    return m is not None and nfc_lower[: m.end()] == stripped[: m.end()]
+
+
+def _is_summary_cell_any_width(cell: str) -> bool:
+    nfc_lower = " ".join(unicodedata.normalize("NFC", cell).lower().split())
+    if _SUMMARY_ANY_CELLS_DIACRITIC_RE.match(nfc_lower) is not None:
+        return True
+    stripped = _strip_accents(nfc_lower)
+    m = _SUMMARY_ANY_CELLS_STRIPPED_RE.match(stripped)
+    return m is not None and nfc_lower[: m.end()] == stripped[: m.end()]
 
 
 def _is_summary_row(non_empty_cells: list[str]) -> bool:
-    if not (1 <= len(non_empty_cells) <= 3):
+    if not non_empty_cells:
         return False
-    return any(_is_summary_cell(c) for c in non_empty_cells)
+    if len(non_empty_cells) <= 3 and any(_is_summary_cell(c) for c in non_empty_cells):
+        return True
+    return any(_is_summary_cell_any_width(c) for c in non_empty_cells)
 
 
 def _is_repeated_header(row: list[str | None], header_cells: list[str | None]) -> bool:

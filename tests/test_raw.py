@@ -10,7 +10,13 @@ import pytest
 
 from datamate.config import settings
 from datamate.io.paths import business_dir
-from datamate.io.raw import RawTable, cell_to_str, load_business_cached, read_business
+from datamate.io.raw import (
+    RawTable,
+    _is_summary_cell_any_width,
+    cell_to_str,
+    load_business_cached,
+    read_business,
+)
 
 
 def _find_table(tables: list[RawTable], prefix: str) -> RawTable:
@@ -319,4 +325,56 @@ def test_real_train_biz_123_sqlite_readonly() -> None:
     sqlite_tables = [t for t in biz_raw.tables if t.kind == "sqlite"]
     assert len(sqlite_tables) > 0
     assert all(t.name.startswith("pos.sqlite!") for t in sqlite_tables)
+
+
+def test_wide_summary_rows_vs_6cell_data_rows(tmp_path: Path) -> None:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = "Sheet1"
+
+    ws.append(["Cột 1", "Cột 2", "Cột 3", "Cột 4", "Cột 5", "Cột 6"])  # row 1: header
+    # Wide summary leak examples (4+ non-empty cells) -> MUST be dropped as summary
+    ws.append(["4,501,000", "4,566,000", "Cộng ngày 03/07/2026", "4,369,000", "197,000", None])  # row 2
+    ws.append(["20014500", "tổng 06/09", "3,3225tr", "100000", "200000", "300000"])  # row 3
+    # 6-cell real data rows -> MUST be kept
+    ws.append(["ORD01", "01/05/2025", "Tống Nam Minh", "SP01", "1", "50000"])  # row 4
+    ws.append(["ORD02", "01/05/2025", "Khách lẻ", "Tổng hợp vitamin C", "2", "120000"])  # row 5
+    ws.append(["ORD03", "01/05/2025", "Tống Thắng Thu", "Công tắc 2 chiều", "5", "45000"])  # row 6
+
+    wb.save(tmp_path / "WideSummary.xlsx")
+    wb.close()
+
+    biz_raw = read_business(tmp_path)
+    table = biz_raw.tables[0]
+
+    assert len(table.df) == 3
+    assert table.df["__row"].tolist() == [4, 5, 6]
+    summary_drops = [d for d in table.dropped if d.reason == "summary"]
+    assert [d.row_no for d in summary_drops] == [2, 3]
+
+
+def test_real_wide_summaries_biz_110_dev_009_dev_010() -> None:
+    targets: list[tuple[str, str]] = []
+    if (settings.data_root / "train").exists():
+        targets.append(("train", "biz_110"))
+    if (settings.data_root / "public_test").exists():
+        targets.extend([("public_test", "dev_009"), ("public_test", "dev_010")])
+    if not targets:
+        pytest.skip("Neither train nor public_test available")
+
+    for split, biz_id in targets:
+        biz_raw = load_business_cached(split, biz_id)
+        for table in biz_raw.tables:
+            for col in table.columns:
+                assert not any(
+                    isinstance(v, str) and _is_summary_cell_any_width(v)
+                    for v in table.df[col]
+                ), f"{split}/{biz_id} table {table.name} col {col} leaked a rule-(b) summary cell"
+
+        if split == "public_test" and biz_id == "dev_010":
+            dh_table = _find_table(biz_raw.tables, "don_hang.csv")
+            summary_drops = [d for d in dh_table.dropped if d.reason == "summary"]
+            assert len(summary_drops) >= 511
+
 
