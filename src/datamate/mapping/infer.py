@@ -5,7 +5,7 @@ import json
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from datamate.config import settings
 from datamate.io.profile import BusinessProfile, TableProfile, render_card
@@ -24,7 +24,15 @@ from datamate.mapping.model import (
 from datamate.mapping.validate import Issue, is_id_or_phone_like, validate_mapping
 from datamate.parse import parse_date, parse_qty
 
+if TYPE_CHECKING:
+    from datamate.etl.build import CanonicalData
+
 _DATA_END_DATE_RE = re.compile(r"có đến hết\s+(\d{1,2}/\d{1,2}/\d{4})", re.IGNORECASE)
+_STEP_MAX_TOKENS = 512
+_NO_ORDER_ID_HINT = (
+    "- Set `order_id` to null if the table records one sale per row "
+    "without an order/invoice code.\n"
+)
 _ALL_ENTITIES: tuple[Entity, ...] = (
     "orders",
     "order_lines",
@@ -50,6 +58,7 @@ class InferResult:
     steps: list[StepLog] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     issues: list[Issue] = field(default_factory=list)
+    canonical: CanonicalData | None = None
 
 
 def extract_data_end_date(readme_text: str | None) -> datetime.date | None:
@@ -193,6 +202,7 @@ def _call_step(
     schema_name: str,
     budget: int,
     repair_suffix: str | None = None,
+    required_keys: list[str] | None = None,
 ) -> tuple[dict[str, Any], StepLog]:
     if repair_suffix:
         full_variants = [f"{v}\n\n{repair_suffix}" for v in prompt_variants]
@@ -210,7 +220,13 @@ def _call_step(
         },
         {"role": "user", "content": chosen_prompt},
     ]
-    ans = client.chat_json(messages=messages, schema=schema, schema_name=schema_name)
+    ans = client.chat_json(
+        messages=messages,
+        schema=schema,
+        schema_name=schema_name,
+        max_tokens=_STEP_MAX_TOKENS,
+        required_keys=required_keys,
+    )
     last_usage = client.usage_log[-1] if getattr(client, "usage_log", None) else None
     actual_toks = (
         last_usage.prompt_tokens
@@ -313,6 +329,7 @@ def _build_step_b_variants(
             "- `line_amount` MUST be the line total AFTER line discount (thành tiền / trị giá / tổng tiền dòng), "
             "NOT the unit price (`unit_price`) and NOT the pre-discount amount.\n"
             "- Only map `qty_base` if the table has a separate pre-converted base-unit quantity column.\n"
+            f"{_NO_ORDER_ID_HINT}"
         )
     elif entity == "orders":
         derived_note = ""
@@ -324,12 +341,14 @@ def _build_step_b_variants(
                 "sales table order-level totals usually do not exist: set them to `null` unless a column "
                 "explicitly holds the whole-order total.\n"
             )
+        order_id_hint = _NO_ORDER_ID_HINT if orders_source == "order_lines" else ""
         extra_hints = (
             "\nImportant for `orders`:\n"
             "- `order_date` is the date the order was placed. If a table has both a date column and a "
             "timestamp/time column, map `order_date` to the date column (or timestamp if it is the only date) "
             "and `order_ts` to the full timestamp column.\n"
             "- `order_subtotal` is the merchandise total BEFORE order-level discount and shipping fee.\n"
+            f"{order_id_hint}"
             f"{derived_note}"
         )
 
@@ -355,16 +374,29 @@ def _build_step_b_variants(
     return variants
 
 
-def _step_b_schema(entity: Entity, actual_columns: list[str]) -> dict[str, Any]:
+def _step_b_required_names(entity: Entity, orders_source: str) -> list[str]:
+    """Canonical fields that must be present. Optional omissions are filled with null."""
+    required = set(REQUIRED_FIELDS.get(entity, ()))
+    if entity == "orders" and orders_source == "own_table":
+        required.add("order_id")
+    return [name for name in FIELD_DOCS[entity] if name in required]
+
+
+def _step_b_schema(
+    entity: Entity,
+    actual_columns: list[str],
+    orders_source: str,
+) -> dict[str, Any]:
     col_enum: list[str | None] = [*actual_columns, None]
-    props: dict[str, Any] = {}
-    fields_list = list(FIELD_DOCS[entity].keys())
-    for fname in fields_list:
-        props[fname] = {"enum": col_enum}
+    required_names = _step_b_required_names(entity, orders_source)
+    required_set = set(required_names)
+    # Required fields first so a truncated answer still contains them.
+    ordered = required_names + [name for name in FIELD_DOCS[entity] if name not in required_set]
+    props = {fname: {"enum": col_enum} for fname in ordered}
     return {
         "type": "object",
         "properties": props,
-        "required": fields_list,
+        "required": ordered,
         "additionalProperties": False,
     }
 
@@ -411,8 +443,10 @@ def _build_step_c_variants(
         prompt = (
             "Map every distinct raw order status value to one of the 4 canonical order states:\n"
             "- `completed`: order is finished / delivered / paid / taken by customer (e.g. hoàn thành, đã xong, đã lấy, xong, ok)\n"
-            "- `cancelled`: order was cancelled / voided (e.g. huỷ, đã hủy đơn, khách hủy)\n"
-            "- `returned`: order had returned / refunded goods (e.g. trả hàng, đổi trả, hoàn hàng, hàng trả về)\n"
+            "- `cancelled`: the order did not happen (e.g. huỷ, đã hủy đơn, khách hủy, "
+            "không giao được, giao thất bại, khách không nhận)\n"
+            "- `returned`: goods came back, including a partial return "
+            "(e.g. trả hàng, đổi trả, hoàn hàng, trả một phần, hàng trả về)\n"
             "- `shipping`: order is currently being delivered / in transit (e.g. đang giao, đang vận chuyển)\n\n"
             f"### README Conventions\n{conv[:cap]}\n\n"
             f"### Distinct Raw Status Values\n{vals_block}"
@@ -698,7 +732,7 @@ def infer_mapping(
         variants = _build_step_b_variants(
             entity, tp, profile.readme_text, orders_source=orders_source
         )
-        schema = _step_b_schema(entity, rt.columns)
+        schema = _step_b_schema(entity, rt.columns, orders_source)
         try:
             ans_b, log_b = _call_step(
                 client=client,
@@ -708,6 +742,7 @@ def infer_mapping(
                 schema_name=f"step_b_{entity}",
                 budget=budget,
                 repair_suffix=repair_suffix,
+                required_keys=_step_b_required_names(entity, orders_source),
             )
             steps_log.append(log_b)
             last_ans_b[entity] = ans_b
@@ -850,17 +885,67 @@ def infer_mapping(
         return_rule=return_rule,
     )
 
-    issues = validate_mapping(raw, mapping)
+    issues, canon = validate_mapping(raw, mapping)
+    dropped_notes: list[Issue] = []
+    retried_drops: set[str] = set()
 
-    # Repair loop: at most 2 repair rounds
+    # Repair loop: at most 2 repair rounds.
+    # Optional-field consistency failures are re-asked once, then that field is dropped.
     for _round in range(2):
-        err_issues = [iss for iss in issues if iss.severity == "error"]
-        if not err_issues:
-            break
+        blocking = [iss for iss in issues if iss.severity == "error" and not iss.drop_field]
+        droppable = [iss for iss in issues if iss.drop_field]
+        fresh: list[Issue] = []
+        persist: list[Issue] = []
+        seen_persist: set[str] = set()
+        for iss in droppable:
+            key = iss.drop_field
+            if key is None:
+                continue
+            if key in retried_drops:
+                if key not in seen_persist:
+                    persist.append(iss)
+                    seen_persist.add(key)
+            else:
+                fresh.append(iss)
+
+        for iss in persist:
+            qualified = iss.drop_field or ""
+            entity_name, field_name = qualified.split(".", 1)
+            ent_drop: Entity = entity_name  # type: ignore[assignment]
+            cols = entity_columns.get(ent_drop)
+            if cols is not None:
+                cols.pop(field_name, None)
+            dropped_notes.append(
+                Issue(
+                    step=iss.step,
+                    severity="warning",
+                    message=f"dropped {field_name}: {iss.message}",
+                )
+            )
+
+        if not blocking and not fresh:
+            if not persist:
+                break
+            mapping = _assemble_mapping(
+                profile=profile,
+                raw_by_name=raw_by_name,
+                chosen_tables=chosen_tables,
+                orders_source=orders_source,
+                entity_columns=entity_columns,
+                status_map=status_map,
+                walk_in_values=walk_in_values,
+                return_rule=return_rule,
+            )
+            fresh_issues, canon = validate_mapping(raw, mapping)
+            issues = [*dropped_notes, *fresh_issues]
+            continue
 
         problems_by_step: dict[str, list[str]] = {}
-        for iss in err_issues:
+        for iss in (*blocking, *fresh):
             problems_by_step.setdefault(iss.step, []).append(iss.message)
+        for iss in fresh:
+            if iss.drop_field is not None:
+                retried_drops.add(iss.drop_field)
 
         status_col_before = entity_columns.get("orders", {}).get("status")
         old_chosen = dict(chosen_tables)
@@ -875,7 +960,7 @@ def infer_mapping(
             suffix_a = f"Previous answer: {prev_a_json}. Problem: {combined_a}. Fix it."
             if not _run_step_a_with_role_retries(initial_repair_suffix=suffix_a):
                 return InferResult(
-                    mapping=mapping, steps=steps_log, errors=errors, issues=issues
+                    mapping=mapping, steps=steps_log, errors=errors, issues=issues, canonical=canon
                 )
 
             # Determine which entities had their effective table or orders_source changed
@@ -906,12 +991,12 @@ def infer_mapping(
                 suffix = f"Previous answer: {prev_json}. Problem: {combined_problem}. Fix it."
                 if not _run_step_b(ent_typed, repair_suffix=suffix):
                     return InferResult(
-                        mapping=mapping, steps=steps_log, errors=errors, issues=issues
+                        mapping=mapping, steps=steps_log, errors=errors, issues=issues, canonical=canon
                     )
             elif ent_typed in rerun_b_from_a:
                 if not _run_step_b(ent_typed, repair_suffix=None):
                     return InferResult(
-                        mapping=mapping, steps=steps_log, errors=errors, issues=issues
+                        mapping=mapping, steps=steps_log, errors=errors, issues=issues, canonical=canon
                     )
 
         # Run Step C if flagged, or if orders table / status column changed
@@ -922,12 +1007,12 @@ def infer_mapping(
             suffix = f"Previous answer: {prev_json}. Problem: {combined_c}. Fix it."
             if not _run_step_c(repair_suffix=suffix):
                 return InferResult(
-                    mapping=mapping, steps=steps_log, errors=errors, issues=issues
+                    mapping=mapping, steps=steps_log, errors=errors, issues=issues, canonical=canon
                 )
         elif need_rerun_c_from_a or status_col_after != status_col_before:
             if not _run_step_c():
                 return InferResult(
-                    mapping=mapping, steps=steps_log, errors=errors, issues=issues
+                    mapping=mapping, steps=steps_log, errors=errors, issues=issues, canonical=canon
                 )
 
         # Run Step D if flagged, or if orders / order_lines table changed from Step A
@@ -937,11 +1022,11 @@ def infer_mapping(
             suffix = f"Previous answer: {prev_json}. Problem: {combined_d}. Fix it."
             if not _run_step_d(repair_suffix=suffix):
                 return InferResult(
-                    mapping=mapping, steps=steps_log, errors=errors, issues=issues
+                    mapping=mapping, steps=steps_log, errors=errors, issues=issues, canonical=canon
                 )
         elif need_rerun_d_from_a and not _run_step_d():
             return InferResult(
-                mapping=mapping, steps=steps_log, errors=errors, issues=issues
+                mapping=mapping, steps=steps_log, errors=errors, issues=issues, canonical=canon
             )
 
         mapping = _assemble_mapping(
@@ -954,12 +1039,49 @@ def infer_mapping(
             walk_in_values=walk_in_values,
             return_rule=return_rule,
         )
-        issues = validate_mapping(raw, mapping)
+        fresh_issues, canon = validate_mapping(raw, mapping)
+        issues = [*dropped_notes, *fresh_issues]
+
+    leftover: list[Issue] = []
+    seen_leftover: set[str] = set()
+    for iss in issues:
+        key = iss.drop_field
+        if key is None or key not in retried_drops or key in seen_leftover:
+            continue
+        leftover.append(iss)
+        seen_leftover.add(key)
+    if leftover:
+        for iss in leftover:
+            qualified = iss.drop_field or ""
+            entity_name, field_name = qualified.split(".", 1)
+            ent_drop: Entity = entity_name  # type: ignore[assignment]
+            cols = entity_columns.get(ent_drop)
+            if cols is not None:
+                cols.pop(field_name, None)
+            dropped_notes.append(
+                Issue(
+                    step=iss.step,
+                    severity="warning",
+                    message=f"dropped {field_name}: {iss.message}",
+                )
+            )
+        mapping = _assemble_mapping(
+            profile=profile,
+            raw_by_name=raw_by_name,
+            chosen_tables=chosen_tables,
+            orders_source=orders_source,
+            entity_columns=entity_columns,
+            status_map=status_map,
+            walk_in_values=walk_in_values,
+            return_rule=return_rule,
+        )
+        fresh_issues, canon = validate_mapping(raw, mapping)
+        issues = [*dropped_notes, *fresh_issues]
 
     remaining_errs = [iss.message for iss in issues if iss.severity == "error"]
     return InferResult(
         mapping=mapping,
         steps=steps_log,
         errors=remaining_errs,
-        issues=issues,
+        issues=issues, canonical=canon,
     )

@@ -32,6 +32,7 @@ class FakeClient:
         schema: dict[str, Any],
         schema_name: str,
         max_tokens: int | None = None,
+        required_keys: list[str] | None = None,
     ) -> dict[str, Any]:
         user_prompt = messages[-1]["content"]
         ptoks = self.count_tokens(user_prompt)
@@ -41,6 +42,8 @@ class FakeClient:
                 "schema": schema,
                 "prompt": user_prompt,
                 "prompt_tokens": ptoks,
+                "max_tokens": max_tokens,
+                "required_keys": required_keys,
             }
         )
         queue = self.scripted.get(schema_name, [])
@@ -171,10 +174,32 @@ def test_infer_mapping_from_scripted_answers_and_step_b_enum(tmp_path: Path) -> 
     assert m.walk_in_values == ["Khách lẻ"]
     assert m.return_rule == "status"
 
+    assert all(c["max_tokens"] == 512 for c in fake.calls)
+    step_b_line_prompt = next(
+        c["prompt"] for c in fake.calls if c["schema_name"] == "step_b_order_lines"
+    )
+    assert "Set `order_id` to null" in step_b_line_prompt
+    step_c_prompt = next(c["prompt"] for c in fake.calls if c["schema_name"] == "step_c_status_map")
+    assert "không giao được" in step_c_prompt
+    assert "trả một phần" in step_c_prompt
+
     # Verify Step B schema enum contains exactly the table's columns + None
     step_b_line_call = next(c for c in fake.calls if c["schema_name"] == "step_b_order_lines")
     enum_vals = step_b_line_call["schema"]["properties"]["line_amount"]["enum"]
     assert enum_vals == ["Mã HĐ", "Tên món", "SL", "Đơn giá", "Thành tiền", None]
+    line_props = step_b_line_call["schema"]["properties"]
+    assert next(iter(line_props)) == "line_amount"
+    assert step_b_line_call["required_keys"] == ["line_amount"]
+    step_b_ord_call = next(c for c in fake.calls if c["schema_name"] == "step_b_orders")
+    assert list(step_b_ord_call["schema"]["properties"])[:3] == [
+        "order_id",
+        "order_date",
+        "status",
+    ]
+    assert step_b_ord_call["required_keys"] == ["order_id", "order_date", "status"]
+    assert res.canonical is not None
+    _issues_again, canon_again = validate_mapping(raw, m)
+    assert canon_again is res.canonical
 
 
 def test_infer_mapping_subtotal_error_triggers_step_b_repair(tmp_path: Path) -> None:
@@ -464,9 +489,17 @@ def test_derived_orders_line_money_collision_and_subtotal_mismatch_route_to_b_or
     assert "order_subtotal" not in res.mapping.tables["orders"].columns
 
     b_ord_calls = [c for c in fake.calls if c["schema_name"] == "step_b_orders"]
-    assert len(b_ord_calls) == 3
-    assert "maps to 'Thành tiền', which is a line-level column (line_amount)" in b_ord_calls[1]["prompt"]
-    assert "order_subtotal is the likely culprit" in b_ord_calls[2]["prompt"]
+    # Optional order_subtotal is re-asked once. The second answer is still wrong,
+    # so the field is dropped instead of a third step-B call.
+    assert len(b_ord_calls) == 2
+    assert (
+        "maps to 'Thành tiền', which is a line-level column (line_amount)"
+        in b_ord_calls[1]["prompt"]
+    )
+    assert any(
+        iss.severity == "warning" and iss.message.startswith("dropped order_subtotal:")
+        for iss in res.issues
+    )
     # step_b_order_lines was never re-run
     assert len([c for c in fake.calls if c["schema_name"] == "step_b_order_lines"]) == 1
 
@@ -538,17 +571,20 @@ def test_step_a_repair_reruns_changed_entities(tmp_path: Path) -> None:
     orig_validate = infer_mod.validate_mapping
     call_count = 0
 
-    def patched_validate(r: Any, m: Mapping) -> list[Issue]:
+    def patched_validate(r: Any, m: Mapping) -> tuple[list[Issue], Any]:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            return [
-                Issue(
-                    step="A",
-                    severity="error",
-                    message="Table BangPhu.xlsx!Sheet1 is not the main orders table.",
-                )
-            ]
+            return (
+                [
+                    Issue(
+                        step="A",
+                        severity="error",
+                        message="Table BangPhu.xlsx!Sheet1 is not the main orders table.",
+                    )
+                ],
+                None,
+            )
         return orig_validate(r, m)
 
     infer_mod.validate_mapping = patched_validate
@@ -723,7 +759,7 @@ def test_duplicate_raw_column_in_same_entity_and_allowed_pairs(tmp_path: Path) -
         }
     )
 
-    issues = validate_mapping(raw, mapping)
+    issues, _canon = validate_mapping(raw, mapping)
     dup_issues = [
         iss
         for iss in issues
@@ -734,6 +770,84 @@ def test_duplicate_raw_column_in_same_entity_and_allowed_pairs(tmp_path: Path) -
     assert dup_issues[0].severity == "error"
 
     # Ensure (qty, unit) on order_lines did NOT trigger a duplicate column error
-    assert not any(
-        "qty and unit both map" in iss.message for iss in issues
+    assert not any("qty and unit both map" in iss.message for iss in issues)
+
+
+def test_persistent_wrong_order_subtotal_is_dropped(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text(
+        "# Shop\n\n## Quy ước\n- Dữ liệu có đến hết 15/08/2026.\n",
+        encoding="utf-8",
     )
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = "Sheet1"
+    ws.append(["Mã HĐ", "Ngày", "Trạng thái", "Khách", "Món", "SL", "Đơn giá", "Thành tiền", "Tổng sau giảm"])
+    ws.append(["ORD01", "01/08/2026", "Đã xong", "Khách lẻ", "Cà phê", "2", "30000", "60000", "50000"])
+    ws.append(["ORD01", "01/08/2026", "Đã xong", "Khách lẻ", "Bánh", "1", "50000", "50000", "50000"])
+    wb.save(tmp_path / "BanHang.xlsx")
+    wb.close()
+
+    raw = read_business(tmp_path)
+    profile = profile_business(raw)
+    line_fields = {
+        "order_id": "Mã HĐ",
+        "line_no": None,
+        "product_id": None,
+        "product_name": "Món",
+        "qty": "SL",
+        "unit": None,
+        "qty_base": None,
+        "unit_price": "Đơn giá",
+        "line_discount": None,
+        "line_amount": "Thành tiền",
+        "cost_per_unit": None,
+    }
+    # order_subtotal is the after-discount total, so the merchandise check keeps failing.
+    wrong_orders = {
+        "order_id": "Mã HĐ",
+        "order_date": "Ngày",
+        "order_ts": None,
+        "status": "Trạng thái",
+        "customer_id": None,
+        "customer_name": "Khách",
+        "payment_method": None,
+        "channel": None,
+        "employee_id": None,
+        "order_subtotal": "Tổng sau giảm",
+        "order_discount": None,
+        "shipping_fee": None,
+        "order_payable": None,
+    }
+    fake = FakeClient(
+        {
+            "step_a_table_roles": [
+                {
+                    "tables": [{"table": "BanHang.xlsx!Sheet1", "entity": "order_lines"}],
+                    "orders_source": "order_lines",
+                },
+                {
+                    "tables": [{"table": "BanHang.xlsx!Sheet1", "entity": "order_lines"}],
+                    "orders_source": "order_lines",
+                },
+            ],
+            "step_b_order_lines": [line_fields],
+            "step_b_orders": [wrong_orders, wrong_orders],
+            "step_c_status_map": [{"Đã xong": "completed"}],
+            "step_d_customers_returns": [
+                {"walk_in_values": ["Khách lẻ"], "return_rule": "status"}
+            ],
+        }
+    )
+
+    res = infer_mapping(raw, profile, fake)
+    assert res.mapping is not None
+    assert res.errors == []
+    assert "order_subtotal" not in res.mapping.tables["orders"].columns
+    assert any(
+        iss.severity == "warning" and iss.message.startswith("dropped order_subtotal:")
+        for iss in res.issues
+    )
+    order_calls = [c for c in fake.calls if c["schema_name"] == "step_b_orders"]
+    assert len(order_calls) == 2
+    assert "Previous answer:" in order_calls[1]["prompt"]

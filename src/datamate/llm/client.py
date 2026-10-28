@@ -25,6 +25,7 @@ class UsageEntry:
     prompt_tokens: int
     completion_tokens: int
     latency_s: float
+    retried: bool = False
 
 
 def _strip_v1_suffix(base_url: str) -> str:
@@ -129,15 +130,32 @@ class LLMClient:
             raise
 
     @staticmethod
-    def _validate_required_keys(parsed: Any, schema: dict[str, Any]) -> dict[str, Any]:
+    def _coerce_answer(
+        parsed: Any,
+        schema: dict[str, Any],
+        required_keys: list[str] | None,
+    ) -> dict[str, Any]:
         if not isinstance(parsed, dict):
             raise LLMError(f"Expected JSON object from LLM, got {type(parsed).__name__}")
-        required = schema.get("required")
-        if isinstance(required, list):
-            missing = [k for k in required if k not in parsed]
-            if missing:
-                raise LLMError(f"LLM JSON response missing required keys {missing}: {parsed}")
-        return parsed
+        props = schema.get("properties")
+        prop_names = list(props) if isinstance(props, dict) else []
+        if required_keys is None:
+            raw_required = schema.get("required")
+            if isinstance(raw_required, list):
+                must = [k for k in raw_required if isinstance(k, str)]
+            else:
+                must = []
+        else:
+            must = list(required_keys)
+        must_set = set(must)
+        filled = dict(parsed)
+        for name in prop_names:
+            if name not in filled and name not in must_set:
+                filled[name] = None
+        missing = [k for k in must if k not in filled]
+        if missing:
+            raise LLMError(f"LLM JSON response missing required keys {missing}: {filled}")
+        return filled
 
     def chat_json(
         self,
@@ -145,6 +163,7 @@ class LLMClient:
         schema: dict[str, Any],
         schema_name: str,
         max_tokens: int | None = None,
+        required_keys: list[str] | None = None,
     ) -> dict[str, Any]:
         resolved_max_tokens = max_tokens if max_tokens is not None else self.max_output_tokens
         key, canonical_req = self._compute_cache_key(messages, schema, resolved_max_tokens)
@@ -162,7 +181,7 @@ class LLMClient:
                     latency_s=latency_s,
                 )
             )
-            return self._validate_required_keys(cached["response_json"], schema)
+            return self._coerce_answer(cached["response_json"], schema, required_keys)
 
         url = f"{self.base_url}/chat/completions"
         body: dict[str, Any] = {
@@ -181,18 +200,23 @@ class LLMClient:
             },
         }
 
-        try:
-            resp = self._http.post(url, json=body)
-        except httpx.HTTPError as exc:
-            raise LLMError(f"HTTP transport error calling {url}: {exc}") from exc
+        resp, retried = self._post_with_timeout_retry(
+            url,
+            body,
+            started=t0,
+            error_prefix=f"HTTP transport error calling {url}",
+        )
 
         if resp.status_code == 400 and "response_format" in resp.text:
             fallback_body = {k: v for k, v in body.items() if k != "response_format"}
             fallback_body["guided_json"] = schema
-            try:
-                resp = self._http.post(url, json=fallback_body)
-            except httpx.HTTPError as exc:
-                raise LLMError(f"HTTP transport error on guided_json retry: {exc}") from exc
+            resp, fallback_retried = self._post_with_timeout_retry(
+                url,
+                fallback_body,
+                started=t0,
+                error_prefix="HTTP transport error on guided_json retry",
+            )
+            retried = retried or fallback_retried
 
         if resp.status_code != 200:
             raise LLMError(f"LLM server error (HTTP {resp.status_code}): {resp.text}")
@@ -206,12 +230,13 @@ class LLMClient:
         if not isinstance(content, str):
             raise LLMError(f"Completion content is not a string: {content!r}")
 
-        try:
-            parsed_obj = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise LLMError(f"LLM returned invalid JSON: {content!r}") from exc
+        finish_reason = data["choices"][0].get("finish_reason")
+        parsed_obj = _parse_llm_json(
+            content,
+            finish_reason if isinstance(finish_reason, str) else None,
+        )
 
-        validated = self._validate_required_keys(parsed_obj, schema)
+        validated = self._coerce_answer(parsed_obj, schema, required_keys)
 
         raw_usage = data.get("usage") or {}
         prompt_tokens = int(raw_usage.get("prompt_tokens", 0))
@@ -224,6 +249,7 @@ class LLMClient:
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 latency_s=latency_s,
+                retried=retried,
             )
         )
 
@@ -238,6 +264,36 @@ class LLMClient:
         }
         self._write_cache_atomic(key, cache_record)
         return validated
+
+    def _post_with_timeout_retry(
+        self,
+        url: str,
+        body: dict[str, Any],
+        *,
+        started: float,
+        error_prefix: str,
+    ) -> tuple[httpx.Response, bool]:
+        """POST `body` once. On timeout, repeat that same request a single time."""
+        try:
+            return self._http.post(url, json=body), False
+        except httpx.TimeoutException:
+            pass
+        except httpx.HTTPError as exc:
+            raise LLMError(f"{error_prefix}: {exc}") from exc
+
+        try:
+            return self._http.post(url, json=body), True
+        except httpx.HTTPError as exc:
+            self.usage_log.append(
+                UsageEntry(
+                    cache_hit=False,
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    latency_s=time.perf_counter() - started,
+                    retried=True,
+                )
+            )
+            raise LLMError(f"{error_prefix}: {exc}") from exc
 
     def count_tokens(self, text: str) -> int:
         if text in self._token_count_cache:
@@ -265,6 +321,39 @@ class LLMClient:
 
         self._token_count_cache[text] = count
         return count
+
+
+def _parse_llm_json(content: str, finish_reason: str | None) -> Any:
+    """Parse structured output, including a JSON object followed only by whitespace.
+
+    Some models emit a finished object and then keep printing newlines until
+    max_tokens, which can also cut off the closing brace.
+    """
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        pass
+
+    stripped = content.lstrip()
+    try:
+        parsed, end = json.JSONDecoder().raw_decode(stripped)
+    except json.JSONDecodeError:
+        parsed = None
+    else:
+        if stripped[end:].strip() == "":
+            return parsed
+
+    if finish_reason == "length":
+        closed = content.rstrip() + "}"
+        try:
+            repaired = json.loads(closed)
+        except json.JSONDecodeError:
+            repaired = None
+        if isinstance(repaired, dict):
+            return repaired
+        raise LLMError("truncated: max_tokens")
+
+    raise LLMError(f"LLM returned invalid JSON: {content!r}")
 
 
 def get_client() -> LLMClient:

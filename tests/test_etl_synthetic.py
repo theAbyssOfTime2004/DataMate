@@ -305,3 +305,93 @@ def test_write_duckdb_describe_types_and_roundtrip(tmp_path: Path) -> None:
         assert row_l == ("ORD01", Decimal("2.5000"), 50000)
     finally:
         conn.close()
+
+
+def test_write_duckdb_wide_decimal_qty(tmp_path: Path) -> None:
+    import pandas as pd
+
+    from datamate.etl import CanonicalData, EtlReport
+    from datamate.etl.schema import (
+        CUSTOMERS_COLUMNS,
+        ORDER_LINES_COLUMNS,
+        ORDERS_COLUMNS,
+        PRODUCTS_COLUMNS,
+        UNIT_CONVERSIONS_COLUMNS,
+    )
+
+    def _empty(cols: tuple[str, ...]) -> pd.DataFrame:
+        return pd.DataFrame({c: pd.Series(dtype=object) for c in cols})
+
+    line_rows: list[dict[str, object]] = []
+    for idx, qty in enumerate((Decimal(1), Decimal(10), Decimal(1000)), start=1):
+        rec: dict[str, object] = {c: None for c in ORDER_LINES_COLUMNS}
+        rec["order_id"] = f"o{idx}"
+        rec["qty"] = qty
+        rec["line_no"] = 1
+        rec["src_row"] = idx
+        rec["is_return_line"] = False
+        line_rows.append(rec)
+
+    data = CanonicalData(
+        orders=_empty(ORDERS_COLUMNS),
+        order_lines=pd.DataFrame(line_rows),
+        products=_empty(PRODUCTS_COLUMNS),
+        unit_conversions=_empty(UNIT_CONVERSIONS_COLUMNS),
+        customers=_empty(CUSTOMERS_COLUMNS),
+        report=EtlReport(),
+    )
+    db_file = tmp_path / "qty.duckdb"
+    write_duckdb(data, db_file)
+
+    conn = duckdb.connect(str(db_file), read_only=True)
+    try:
+        got = [
+            row[0]
+            for row in conn.execute(
+                "SELECT qty FROM order_lines ORDER BY src_row"
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+    assert got == [Decimal("1.0000"), Decimal("10.0000"), Decimal("1000.0000")]
+
+
+def test_no_order_id_is_one_order_per_row_and_skips_dedupe(tmp_path: Path) -> None:
+    (tmp_path / "ledger.csv").write_text(
+        "Ngày,Trạng thái,Khách,Món,SL,Tiền\n"
+        "01/08/2026,xong,An,Cà phê,1,10000\n"
+        "01/08/2026,xong,An,Cà phê,1,10000\n",
+        encoding="utf-8",
+    )
+    mapping = Mapping.model_validate(
+        {
+            "customer_identity": "by_name",
+            "return_rule": "status",
+            "status_map": {"xong": "completed"},
+            "tables": {
+                "orders": {
+                    "derived_from": "order_lines",
+                    "columns": {
+                        "order_date": "Ngày",
+                        "status": "Trạng thái",
+                        "customer_name": "Khách",
+                    },
+                },
+                "order_lines": {
+                    "sources": [{"file": "ledger.csv", "sheet": None, "header_row": 1}],
+                    "columns": {
+                        "product_name": "Món",
+                        "qty": "SL",
+                        "line_amount": "Tiền",
+                    },
+                },
+            },
+        }
+    )
+    canon = build_canonical(read_business(tmp_path), mapping)
+    assert "no order id: one order per row" in canon.report.notes
+    assert sum(canon.report.dedupe_counts.values()) == 0
+    assert len(canon.order_lines) == 2
+    assert len(canon.orders) == 2
+    ids = set(canon.orders["order_id"].tolist())
+    assert ids == {"ledger.csv||2", "ledger.csv||3"}

@@ -62,6 +62,10 @@ CUSTOMERS_COLUMNS: tuple[str, ...] = (
     "segment",
 )
 
+# DuckDB must not infer DECIMAL width from the first Python Decimal values.
+DECIMAL_SQL_TYPE = "DECIMAL(18,4)"
+DECIMAL_COLUMNS: frozenset[str] = frozenset({"qty", "qty_base", "factor"})
+
 TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "orders": ORDERS_COLUMNS,
     "order_lines": ORDER_LINES_COLUMNS,

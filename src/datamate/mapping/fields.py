@@ -74,6 +74,6 @@ FIELD_DOCS: dict[Entity, dict[str, str]] = {
 }
 
 REQUIRED_FIELDS: dict[str, set[str]] = {
-    "order_lines": {"order_id", "line_amount"},
-    "orders": {"order_id", "order_date", "status"},
+    "order_lines": {"line_amount"},
+    "orders": {"order_date", "status"},
 }

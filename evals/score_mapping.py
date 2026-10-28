@@ -19,7 +19,7 @@ def _file_set(tm: TableMapping) -> frozenset[str]:
 
 
 def _walk_in_set(values: list[str]) -> set[str]:
-    return {_norm_key(v) for v in values}
+    return {key for v in values if (key := _norm_key(v))}
 
 
 @dataclass
@@ -67,6 +67,8 @@ def _score_tables(pred: Mapping, gold: Mapping) -> tuple[bool, list[str]]:
     notes: list[str] = []
     ok = True
     for entity, gtm in gold.tables.items():
+        if gtm.source == "readme":
+            continue
         ptm = pred.tables.get(entity)
         if ptm is None:
             ok = False
@@ -97,6 +99,8 @@ def _score_columns(
     scored: list[FieldVerdict] = []
     extras: list[FieldVerdict] = []
     for entity, gtm in gold.tables.items():
+        if gtm.source == "readme":
+            continue
         pred_cols = pred.tables[entity].columns if entity in pred.tables else {}
         for field_name, gold_col in gtm.columns.items():
             pred_col = pred_cols.get(field_name)

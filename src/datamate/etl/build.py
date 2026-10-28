@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
@@ -162,9 +162,18 @@ def _strip_str(val: Any) -> str | None:
     return s if s else None
 
 
+@dataclass
+class _ParseCounter:
+    non_null: int = 0
+    parsed: int = 0
+    examples: list[str] = field(default_factory=list)
+
+
 class _StatTracker:
+    """Plain counters. Pydantic FieldParseStat objects are built once in finalize()."""
+
     def __init__(self) -> None:
-        self.stats: dict[str, FieldParseStat] = {}
+        self.stats: dict[str, _ParseCounter] = {}
 
     def record(self, key: str, raw_val: str | None, parsed_ok: bool) -> None:
         raw_clean = _strip_str(raw_val)
@@ -172,7 +181,7 @@ class _StatTracker:
             return
         st = self.stats.get(key)
         if st is None:
-            st = FieldParseStat()
+            st = _ParseCounter()
             self.stats[key] = st
         st.non_null += 1
         if parsed_ok:
@@ -182,9 +191,16 @@ class _StatTracker:
             st.examples.append(raw_val)
 
     def finalize(self) -> dict[str, FieldParseStat]:
-        for st in self.stats.values():
-            st.rate = round(st.parsed / st.non_null, 6) if st.non_null > 0 else 1.0
-        return self.stats
+        out: dict[str, FieldParseStat] = {}
+        for key, st in self.stats.items():
+            rate = round(st.parsed / st.non_null, 6) if st.non_null > 0 else 1.0
+            out[key] = FieldParseStat(
+                non_null=st.non_null,
+                parsed=st.parsed,
+                rate=rate,
+                examples=list(st.examples),
+            )
+        return out
 
 
 def _parse_int_id(raw: str | None) -> int | None:
@@ -423,6 +439,11 @@ def _resolve_customer_fields(
     return norm_id, False
 
 
+def _synthetic_order_id(file_name: str, sheet_name: str | None, row_no: int) -> str:
+    sheet = sheet_name if isinstance(sheet_name, str) else ""
+    return f"{file_name}|{sheet}|{row_no}"
+
+
 def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
     warnings: list[str] = []
     notes: list[str] = []
@@ -453,9 +474,10 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
     if orders_tm.derived_from == "order_lines":
         _validate_mapped_columns("orders", orders_tm, line_chunks)
 
-    if "order_id" not in lines_tm.columns:
-        raise MappingError("Entity 'order_lines' must map canonical field 'order_id'")
-    order_id_raw_col = lines_tm.columns["order_id"]
+    no_line_order_id = "order_id" not in lines_tm.columns
+    order_id_raw_col = None if no_line_order_id else lines_tm.columns["order_id"]
+    if no_line_order_id:
+        notes.append("no order id: one order per row")
 
     order_level_raw_cols: dict[str, list[str]] = {}
     if orders_tm.derived_from == "order_lines":
@@ -500,26 +522,34 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
                 s_row[c] if isinstance(s_row[c], str) else None for c in rt_data_cols
             )
 
-            raw_oid_val = s_row[order_id_raw_col]
-            raw_oid_cell = raw_oid_val if isinstance(raw_oid_val, str) else None
-            if raw_oid_cell is None and prev_order_id is not None:
-                resolved_oid_raw: str | None = prev_order_id
-                oid_clean: str | None = prev_order_id_clean
-                fill_counts["order_id"] += 1
-                same_order_as_prev = True
+            if no_line_order_id:
+                # One sale per row: do not forward-fill order_id and do not dedupe.
+                resolved_oid_raw = None
+                oid_clean = None
+                same_order_as_prev = False
             else:
-                resolved_oid_raw = raw_oid_cell
-                oid_clean = _strip_str(resolved_oid_raw)
-                same_order_as_prev = (
-                    oid_clean is not None
-                    and prev_order_id_clean is not None
-                    and oid_clean == prev_order_id_clean
-                )
+                assert order_id_raw_col is not None
+                raw_oid_val = s_row[order_id_raw_col]
+                raw_oid_cell = raw_oid_val if isinstance(raw_oid_val, str) else None
+                if raw_oid_cell is None and prev_order_id is not None:
+                    resolved_oid_raw = prev_order_id
+                    oid_clean = prev_order_id_clean
+                    fill_counts["order_id"] += 1
+                    same_order_as_prev = True
+                else:
+                    resolved_oid_raw = raw_oid_cell
+                    oid_clean = _strip_str(resolved_oid_raw)
+                    same_order_as_prev = (
+                        oid_clean is not None
+                        and prev_order_id_clean is not None
+                        and oid_clean == prev_order_id_clean
+                    )
 
             filled_row_dict: dict[str, str | None] = {
                 c: (s_row[c] if isinstance(s_row[c], str) else None) for c in rt_data_cols
             }
-            filled_row_dict[order_id_raw_col] = resolved_oid_raw
+            if order_id_raw_col is not None:
+                filled_row_dict[order_id_raw_col] = resolved_oid_raw
 
             if is_derived_orders and order_level_raw_cols:
                 for raw_col_name, canonical_o_fields in order_level_raw_cols.items():
@@ -546,7 +576,7 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
                         if val_in_row is not None:
                             prev_order_raw_vals[raw_col_name] = val_in_row
 
-            if oid_clean is not None:
+            if not no_line_order_id and oid_clean is not None:
                 dedupe_key = (oid_clean, pre_fill_tuple)
                 if dedupe_key in seen_set:
                     dedupe_counts[rt.name] += 1
@@ -587,8 +617,12 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
         r_no: int = rec["__row"]
         rdict: dict[str, str | None] = rec["raw"]
 
-        oid_raw = rdict.get(c_l_oid) if c_l_oid is not None else None
-        oid = _strip_str(oid_raw)
+        if c_l_oid is None:
+            oid = _synthetic_order_id(f_name, s_name, r_no)
+            oid_raw = oid
+        else:
+            oid_raw = rdict.get(c_l_oid)
+            oid = _strip_str(oid_raw)
         tracker.record("order_lines.order_id", oid_raw, oid is not None)
 
         lno_raw = rdict.get(c_l_lno) if c_l_lno is not None else None

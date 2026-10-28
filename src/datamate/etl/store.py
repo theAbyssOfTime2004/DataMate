@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -10,12 +11,12 @@ import pandas as pd
 
 from datamate.config import settings
 from datamate.etl.build import CanonicalData, EtlReport, build_canonical
-from datamate.etl.schema import TABLE_COLUMNS, TABLE_DDLS
+from datamate.etl.schema import DECIMAL_COLUMNS, DECIMAL_SQL_TYPE, TABLE_COLUMNS, TABLE_DDLS
 from datamate.io.paths import business_dir
 from datamate.io.raw import _compute_business_cache_key, load_business_cached
 from datamate.mapping.model import Mapping, mapping_fingerprint
 
-ETL_VERSION = "1.1"
+ETL_VERSION = "1.2"
 
 _COLUMN_SQL_TYPES: dict[str, dict[str, str]] = {
     "orders": {
@@ -89,6 +90,10 @@ def _prepare_df_for_duckdb(df: pd.DataFrame, cols: tuple[str, ...]) -> pd.DataFr
             val = row[c]
             if val is None or (isinstance(val, float) and pd.isna(val)):
                 rec[c] = None
+            elif isinstance(val, Decimal):
+                rec[c] = format(val, "f")
+            elif c in DECIMAL_COLUMNS:
+                rec[c] = str(val)
             else:
                 rec[c] = val
         records.append(rec)
@@ -122,7 +127,11 @@ def write_duckdb(data: CanonicalData, path: Path | str) -> None:
                 continue
             conn.register("_staging_df", src_df)
             cast_exprs = [
-                f'CAST("{c}" AS {_COLUMN_SQL_TYPES[tname][c]}) AS "{c}"'
+                (
+                    f'CAST("{c}" AS '
+                    f'{DECIMAL_SQL_TYPE if c in DECIMAL_COLUMNS else _COLUMN_SQL_TYPES[tname][c]}) '
+                    f'AS "{c}"'
+                )
                 for c in cols
             ]
             select_sql = ", ".join(cast_exprs)

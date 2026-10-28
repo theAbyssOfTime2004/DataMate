@@ -18,7 +18,7 @@ if str(PROJECT_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from datamate.config import settings
-from datamate.etl import load_or_build_canonical
+from datamate.etl import CanonicalData, load_or_build_canonical, write_duckdb
 from datamate.io.profile import profile_business
 from datamate.io.questions import load_questions, load_references
 from datamate.io.raw import load_business_cached
@@ -115,12 +115,34 @@ class BusinessRun:
     mapping_ok: bool = False
 
 
+def _canonical_db(
+    split: str,
+    biz_id: str,
+    mapping: Mapping,
+    canon: CanonicalData | None,
+    run_dir: Path,
+) -> tuple[Path | None, str | None]:
+    """Reuse the frames validate_mapping already built. Fall back to a full ETL."""
+    if canon is not None:
+        db_path = run_dir / f"{biz_id}.duckdb"
+        try:
+            write_duckdb(canon, db_path)
+        except Exception as exc:  # noqa: BLE001 — predicted mapping may be arbitrarily broken
+            return None, f"{type(exc).__name__}: {exc}"
+        return db_path, None
+    try:
+        db_path, _report = load_or_build_canonical(split, biz_id, mapping)
+    except Exception as exc:  # noqa: BLE001 — predicted mapping may be arbitrarily broken
+        return None, f"{type(exc).__name__}: {exc}"
+    return db_path, None
+
+
 def _infer_one(
     split: str,
     biz_id: str,
     client: Any,
     run_dir: Path,
-) -> tuple[Mapping | None, InferStats]:
+) -> tuple[Mapping | None, InferStats, CanonicalData | None]:
     t0 = time.perf_counter()
     raw = load_business_cached(split, biz_id)
     profile = profile_business(raw)
@@ -147,22 +169,23 @@ def _infer_one(
             "\n".join(result.errors) or "infer_mapping returned no mapping",
             encoding="utf-8",
         )
-    return mapping, stats
+    return mapping, stats, result.canonical
 
 
 def _query_expected_revenues(
     split: str,
     biz_id: str,
     mapping: Mapping,
+    canon: CanonicalData | None,
+    run_dir: Path,
 ) -> tuple[list[tuple[str, int | None, int, bool]], str | None]:
     expected = [(ym, rev) for b, ym, rev in EXPECTED_REVENUES if b == biz_id]
     if not expected:
         return [], None
-    try:
-        db_path, _report = load_or_build_canonical(split, biz_id, mapping)
-    except Exception as exc:  # noqa: BLE001 — predicted mapping may be arbitrarily broken
+    db_path, etl_error = _canonical_db(split, biz_id, mapping, canon, run_dir)
+    if db_path is None:
         rows = [(ym, None, gold, False) for ym, gold in expected]
-        return rows, f"{type(exc).__name__}: {exc}"
+        return rows, etl_error
 
     rows: list[tuple[str, int | None, int, bool]] = []
     for ym, gold in expected:
@@ -261,7 +284,7 @@ def _format_mismatch_block(biz_id: str, run: BusinessRun) -> list[str]:
         actual_s = "—" if actual is None else f"{actual:,}"
         lines.append(f"- revenue `{ym}`: gold=`{gold_rev:,}` pred=`{actual_s}`")
     if not any_line:
-        lines.append("- (none)")
+        return []
     lines.append("")
     return lines
 
@@ -384,17 +407,20 @@ def _render_probe_summary(
         any_detail = True
         lines.append(f"### `{r.business_id}`")
         lines.append("")
+        if r.abstain_reason and r.n_match == 0 and r.n_mismatch == 0:
+            lines.append(f"- abstain: {r.abstain_reason}")
+            lines.append("")
+            continue
         if r.abstain_reason:
             lines.append(f"- abstain reason: {r.abstain_reason}")
         for row in interesting:
             if row.status == "abstain":
-                lines.append(f"- `{row.question_id}` `{row.year_month}` abstain ({row.detail})")
-            else:
-                actual_s = "—" if row.actual is None else f"{row.actual:,}"
-                lines.append(
-                    f"- `{row.question_id}` `{row.year_month}`: "
-                    f"gold=`{row.expected:,}` pred=`{actual_s}`"
-                )
+                continue
+            actual_s = "—" if row.actual is None else f"{row.actual:,}"
+            lines.append(
+                f"- `{row.question_id}` `{row.year_month}`: "
+                f"gold=`{row.expected:,}` pred=`{actual_s}`"
+            )
         lines.append("")
     if not any_detail:
         lines.append("- (none)")
@@ -412,12 +438,14 @@ def run_gold_mode(
     for biz_id in businesses:
         print(f"[{biz_id}] infer …", flush=True)
         t_biz = time.perf_counter()
-        mapping, stats = _infer_one(split, biz_id, client, run_dir)
+        mapping, stats, canon = _infer_one(split, biz_id, client, run_dir)
         ms = _score_vs_gold(mapping, biz_id) if mapping is not None else None
         revenue_rows: list[tuple[str, int | None, int, bool]] = []
         etl_error: str | None = None
         if mapping is not None:
-            revenue_rows, etl_error = _query_expected_revenues(split, biz_id, mapping)
+            revenue_rows, etl_error = _query_expected_revenues(
+                split, biz_id, mapping, canon, run_dir
+            )
         stats.wall_s = time.perf_counter() - t_biz
         hits = sum(1 for _ym, _a, _g, ok in revenue_rows if ok)
         total = len(revenue_rows)
@@ -464,7 +492,7 @@ def run_probe_mode(
             continue
         print(f"[{biz_id}] infer ({len(qrows)} probe q) …", flush=True)
         t_biz = time.perf_counter()
-        mapping, stats = _infer_one(split, biz_id, client, run_dir)
+        mapping, stats, canon = _infer_one(split, biz_id, client, run_dir)
         rows: list[ProbeQuestionResult] = []
         abstain_reason: str | None = None
 
@@ -495,12 +523,8 @@ def run_probe_mode(
                     )
                 )
         else:
-            try:
-                db_path, _report = load_or_build_canonical(split, biz_id, mapping)
-                etl_error = None
-            except Exception as exc:  # noqa: BLE001 — predicted mapping may be arbitrarily broken
-                db_path = None
-                etl_error = f"{type(exc).__name__}: {exc}"
+            db_path, etl_error = _canonical_db(split, biz_id, mapping, canon, run_dir)
+            if etl_error is not None:
                 abstain_reason = f"ETL failed: {etl_error}"
 
             if db_path is None:

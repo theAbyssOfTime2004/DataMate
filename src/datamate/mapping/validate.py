@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from datamate.io.raw import BusinessRaw
 from datamate.mapping.fields import REQUIRED_FIELDS
-from datamate.mapping.model import Entity, Mapping
+from datamate.mapping.model import Entity, Mapping, mapping_fingerprint
 
 if TYPE_CHECKING:
     from datamate.etl.build import CanonicalData
@@ -50,6 +50,24 @@ class Issue(BaseModel):
     step: str
     severity: Literal["error", "warning"]
     message: str
+    # When set, infer may re-ask once and then drop this optional field instead of blocking.
+    drop_field: str | None = None
+
+
+# Last successful build, keyed by business directory + mapping_fingerprint.
+_last_validated_build: tuple[str, CanonicalData] | None = None
+
+
+def _build_cache_key(raw: BusinessRaw, mapping: Mapping) -> str:
+    return f"{raw.business_dir}|{mapping_fingerprint(mapping)}"
+
+
+def cached_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData | None:
+    """Return the canonical frames from the latest validate_mapping of this mapping."""
+    cached = _last_validated_build
+    if cached is None or cached[0] != _build_cache_key(raw, mapping):
+        return None
+    return cached[1]
 
 
 def _check_line_math_share(canon: CanonicalData) -> float | None:
@@ -79,7 +97,9 @@ def _check_line_math_share(canon: CanonicalData) -> float | None:
     return matched / checked
 
 
-def validate_mapping(raw: BusinessRaw, mapping: Mapping) -> list[Issue]:
+def validate_mapping(
+    raw: BusinessRaw, mapping: Mapping
+) -> tuple[list[Issue], CanonicalData | None]:
     issues: list[Issue] = []
 
     for entity_name, req_fields in REQUIRED_FIELDS.items():
@@ -127,6 +147,24 @@ def validate_mapping(raw: BusinessRaw, mapping: Mapping) -> list[Issue]:
     orders_tm = mapping.tables["orders"]
     lines_tm = mapping.tables["order_lines"]
 
+    # order_id stays required only when orders come from their own table.
+    missing_own_order_id = (
+        bool(orders_tm.sources)
+        and "order_id" not in orders_tm.columns
+        and "order_id" not in orders_tm.join
+    )
+    if missing_own_order_id:
+        issues.append(
+            Issue(
+                step="B_orders",
+                severity="error",
+                message=(
+                    "Entity 'orders' has its own table but is missing required canonical "
+                    "field 'order_id'."
+                ),
+            )
+        )
+
     # Check derived orders mapping order-level money fields to a line-level column
     if orders_tm.derived_from == "order_lines":
         line_col_to_field = {raw_col: l_field for l_field, raw_col in lines_tm.columns.items()}
@@ -138,6 +176,7 @@ def validate_mapping(raw: BusinessRaw, mapping: Mapping) -> list[Issue]:
                     Issue(
                         step="B_orders",
                         severity="error",
+                        drop_field=f"orders.{om_field}",
                         message=(
                             f"{om_field} maps to {raw_col!r}, which is a line-level column "
                             f"({l_field}); in a flat sales table order-level totals usually do "
@@ -173,17 +212,23 @@ def validate_mapping(raw: BusinessRaw, mapping: Mapping) -> list[Issue]:
 
     from datamate.etl.build import MappingError, build_canonical
 
-    try:
-        canon = build_canonical(raw, mapping)
-    except MappingError as exc:
-        msg = str(exc)
-        step_target = "A"
-        for ent_key in ("orders", "order_lines", "products", "unit_conversions", "customers"):
-            if f"Entity {ent_key!r} field" in msg:
-                step_target = f"B_{ent_key}"
-                break
-        issues.append(Issue(step=step_target, severity="error", message=msg))
-        return issues
+    global _last_validated_build
+    cached = cached_canonical(raw, mapping)
+    if cached is not None:
+        canon = cached
+    else:
+        try:
+            canon = build_canonical(raw, mapping)
+        except MappingError as exc:
+            msg = str(exc)
+            step_target = "A"
+            for ent_key in ("orders", "order_lines", "products", "unit_conversions", "customers"):
+                if f"Entity {ent_key!r} field" in msg:
+                    step_target = f"B_{ent_key}"
+                    break
+            issues.append(Issue(step=step_target, severity="error", message=msg))
+            return issues, None
+        _last_validated_build = (_build_cache_key(raw, mapping), canon)
 
     rep = canon.report
 
@@ -246,6 +291,7 @@ def validate_mapping(raw: BusinessRaw, mapping: Mapping) -> list[Issue]:
                 Issue(
                     step="B_orders",
                     severity="error",
+                    drop_field="orders.order_subtotal",
                     message=(
                         f"sum of line_amount ({lamt_col!r}) differs from order_subtotal "
                         f"({sub_col!r}) in {diff_pct:.1f}% of orders "
@@ -261,6 +307,7 @@ def validate_mapping(raw: BusinessRaw, mapping: Mapping) -> list[Issue]:
                 Issue(
                     step="B_order_lines",
                     severity="error",
+                    drop_field="orders.order_subtotal",
                     message=(
                         f"sum of line_amount ({lamt_col!r}) differs from order_subtotal "
                         f"({sub_col!r}) in {diff_pct:.1f}% of orders "
@@ -324,6 +371,7 @@ def validate_mapping(raw: BusinessRaw, mapping: Mapping) -> list[Issue]:
                 Issue(
                     step="B_order_lines",
                     severity="warning",
+                    drop_field="order_lines.unit_price",
                     message=(
                         f"qty * unit_price - line_discount matches line_amount in only "
                         f"{math_share:.1%} of lines (< 80%)."
@@ -331,4 +379,4 @@ def validate_mapping(raw: BusinessRaw, mapping: Mapping) -> list[Issue]:
                 )
             )
 
-    return issues
+    return issues, canon

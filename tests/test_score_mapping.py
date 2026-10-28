@@ -96,3 +96,19 @@ def test_one_wrong_column_and_one_wrong_status() -> None:
     assert ms.walk_in_ok is True
     assert ms.return_rule_ok is True
     assert ms.data_end_ok is True
+
+
+def test_readme_source_is_not_a_table_miss_and_empty_walk_in_matches() -> None:
+    raw = _minimal_mapping_dict()
+    raw["tables"]["unit_conversions"] = {"source": "readme", "columns": {}}
+    raw["walk_in_values"] = [""]
+    gold = Mapping.model_validate(raw)
+
+    pred_raw = _minimal_mapping_dict()
+    pred_raw["walk_in_values"] = []
+    pred = Mapping.model_validate(pred_raw)
+
+    ms = score(pred, gold)
+    assert ms.tables_ok is True
+    assert ms.walk_in_ok is True
+    assert ms.table_notes == []

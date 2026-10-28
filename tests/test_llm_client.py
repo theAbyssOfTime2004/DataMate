@@ -171,6 +171,179 @@ def test_count_tokens_endpoint_and_fallback(tmp_path: Path) -> None:
     client_fallback.close()
 
 
+def test_chat_json_salvages_trailing_whitespace_and_unclosed_object(tmp_path: Path) -> None:
+    payloads = [
+        '{"a": 1}' + "\n" * 500,
+        '{"a": 1' + "\n" * 500,
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        idx = 0 if body["messages"][-1]["content"] == "closed" else 1
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": payloads[idx]},
+                        "finish_reason": "length",
+                    }
+                ],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 512},
+            },
+        )
+
+    client = LLMClient(
+        base_url="http://mock-server:8000/v1",
+        cache_dir=tmp_path,
+        cache_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "integer"}},
+        "required": ["a"],
+    }
+    assert client.chat_json(
+        [{"role": "user", "content": "closed"}],
+        schema=schema,
+        schema_name="ws",
+    ) == {"a": 1}
+    assert client.chat_json(
+        [{"role": "user", "content": "open"}],
+        schema=schema,
+        schema_name="ws",
+    ) == {"a": 1}
+
+    def truncated(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": '{"a": '}, "finish_reason": "length"}
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 512},
+            },
+        )
+
+    broken = LLMClient(
+        base_url="http://mock-server:8000/v1",
+        cache_dir=tmp_path,
+        cache_enabled=False,
+        transport=httpx.MockTransport(truncated),
+    )
+    with pytest.raises(LLMError, match="truncated: max_tokens"):
+        broken.chat_json(
+            [{"role": "user", "content": "cut"}],
+            schema=schema,
+            schema_name="cut",
+        )
+    client.close()
+    broken.close()
+
+
+def test_salvaged_answer_missing_optional_key_becomes_null(tmp_path: Path) -> None:
+    content = '{"line_amount": "Tổng tiền"' + "\n" * 40
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": content}, "finish_reason": "length"}
+                ],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 512},
+            },
+        )
+
+    client = LLMClient(
+        base_url="http://mock-server:8000/v1",
+        cache_dir=tmp_path,
+        cache_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    schema = {
+        "type": "object",
+        "properties": {
+            "line_amount": {"type": ["string", "null"]},
+            "cost_per_unit": {"type": ["string", "null"]},
+        },
+        "required": ["line_amount", "cost_per_unit"],
+        "additionalProperties": False,
+    }
+    out = client.chat_json(
+        [{"role": "user", "content": "map"}],
+        schema=schema,
+        schema_name="step_b_order_lines",
+        required_keys=["line_amount"],
+    )
+    assert out == {"line_amount": "Tổng tiền", "cost_per_unit": None}
+    with pytest.raises(LLMError, match="missing required keys"):
+        client.chat_json(
+            [{"role": "user", "content": "map"}],
+            schema=schema,
+            schema_name="step_b_order_lines",
+        )
+    client.close()
+
+
+def test_chat_json_retries_httpx_timeout_once(tmp_path: Path) -> None:
+    calls: list[bytes] = []
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "integer"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+    messages = [{"role": "user", "content": "Return 42"}]
+
+    def timeout_then_ok(request: httpx.Request) -> httpx.Response:
+        calls.append(request.content)
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("timed out")
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"answer": 42}'}}],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 3},
+            },
+        )
+
+    client = LLMClient(
+        base_url="http://mock-server:8000/v1",
+        cache_dir=tmp_path,
+        cache_enabled=False,
+        transport=httpx.MockTransport(timeout_then_ok),
+    )
+    assert client.chat_json(messages, schema=schema, schema_name="retry_ok") == {"answer": 42}
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    assert len(client.usage_log) == 1
+    assert client.usage_log[0].retried is True
+    assert client.usage_log[0].cache_hit is False
+    assert client.usage_log[0].prompt_tokens == 7
+    client.close()
+
+    both_failed: list[int] = []
+
+    def always_timeout(request: httpx.Request) -> httpx.Response:
+        both_failed.append(1)
+        raise httpx.ReadTimeout("timed out")
+
+    broken = LLMClient(
+        base_url="http://mock-server:8000/v1",
+        cache_dir=tmp_path,
+        cache_enabled=False,
+        transport=httpx.MockTransport(always_timeout),
+    )
+    with pytest.raises(LLMError, match="timed out"):
+        broken.chat_json(messages, schema=schema, schema_name="retry_fail")
+    assert len(both_failed) == 2
+    assert len(broken.usage_log) == 1
+    assert broken.usage_log[0].retried is True
+    broken.close()
+
+
 def test_live_vllm_smoke(tmp_path: Path) -> None:
     models_url = f"{settings.llm_base_url.rstrip('/')}/models"
     try:
