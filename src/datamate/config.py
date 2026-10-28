@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     llm_model: str = "qwen3-4b"
     llm_api_key: str = "EMPTY"
     llm_timeout_s: float = 120.0
+    llm_max_context: int = 8192
+    llm_max_output_tokens: int = 1024
+    llm_prompt_budget_tokens: int = 6000
+    llm_cache_enabled: bool = True
     seed: int = 20261116
 
     @field_validator("cache_dir", "runs_dir", mode="after")
