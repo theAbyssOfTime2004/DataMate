@@ -1,0 +1,21 @@
+{
+  "revenue_statuses": ["completed", "shipping"],
+  "exclude_orders_with_return": true,
+  "cancel_rate_denominator": "all_orders",
+  "shifts": {
+    "morning": ["06:00:00", "13:59:59"],
+    "afternoon": ["14:00:00", "21:59:59"]
+  },
+  "week_start": "monday",
+  "month_this_compare": "same_day_count",
+  "tet": {
+    "start_lunar_month": 12,
+    "start_lunar_day": 23,
+    "start_year_offset": -1,
+    "end_lunar_month": 1,
+    "end_lunar_day": 10
+  },
+  "percent_decimals": 2,
+  "rounding": "half_up",
+  "non_product_line_labels": ["Phí phục vụ"]
+}
