@@ -19,6 +19,14 @@ class LLMError(RuntimeError):
     """Raised when an LLM request fails or returns invalid structured JSON."""
 
 
+class LLMUnavailable(LLMError):
+    """The server could not be reached, timed out twice, or failed with HTTP 5xx.
+
+    This is an infrastructure failure, not a model answer: callers must not turn it into
+    an ordinary abstain or a failed mapping.
+    """
+
+
 @dataclass
 class UsageEntry:
     cache_hit: bool
@@ -58,9 +66,7 @@ class LLMClient:
             cache_enabled if cache_enabled is not None else settings.llm_cache_enabled
         )
         self.max_output_tokens = (
-            max_output_tokens
-            if max_output_tokens is not None
-            else settings.llm_max_output_tokens
+            max_output_tokens if max_output_tokens is not None else settings.llm_max_output_tokens
         )
         self.usage_log: list[UsageEntry] = []
         self._token_count_cache: dict[str, int] = {}
@@ -218,6 +224,8 @@ class LLMClient:
             )
             retried = retried or fallback_retried
 
+        if resp.status_code >= 500:
+            raise LLMUnavailable(f"LLM server error (HTTP {resp.status_code}): {resp.text}")
         if resp.status_code != 200:
             raise LLMError(f"LLM server error (HTTP {resp.status_code}): {resp.text}")
 
@@ -279,7 +287,7 @@ class LLMClient:
         except httpx.TimeoutException:
             pass
         except httpx.HTTPError as exc:
-            raise LLMError(f"{error_prefix}: {exc}") from exc
+            raise LLMUnavailable(f"{error_prefix}: {exc}") from exc
 
         try:
             return self._http.post(url, json=body), True
@@ -293,7 +301,7 @@ class LLMClient:
                     retried=True,
                 )
             )
-            raise LLMError(f"{error_prefix}: {exc}") from exc
+            raise LLMUnavailable(f"{error_prefix}: {exc}") from exc
 
     def count_tokens(self, text: str) -> int:
         if text in self._token_count_cache:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,20 @@ from datamate.io.paths import business_dir
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from evals.run_eval import _unique_run_dir, run_evaluation
+from datamate.scoring.answer import Answer
+from evals.run_eval import (
+    MAX_CONSECUTIVE_LLM_UNAVAILABLE,
+    _unique_run_dir,
+    run_evaluation,
+)
+
+
+class _DeadLLMSystem:
+    name = "dead_llm"
+
+    def answer(self, question: object, workdir: Path) -> tuple[Answer, dict[str, object]]:
+        del question, workdir
+        return Answer.abstain(), {"abstain_reason": "llm_unavailable"}
 
 
 def test_business_dir_train_biz_101() -> None:
@@ -112,3 +126,77 @@ def test_run_eval_public_test_unscored_limit_5(tmp_path: Path) -> None:
     assert "PA" not in metrics
     assert set(metrics["timing"].keys()) == {"total_wall_s", "mean_s", "p95_s"}
     assert "unscored split" in summary_file.read_text(encoding="utf-8")
+
+
+def test_run_eval_aborts_when_the_llm_server_is_down(tmp_path: Path) -> None:
+    if not (settings.data_root / "train").exists():
+        pytest.skip(f"Train data folder absent at {settings.data_root / 'train'}")
+
+    with pytest.raises(SystemExit, match="unavailable"):
+        run_evaluation(
+            split="train",
+            subset="poc",
+            limit=10,
+            runs_dir=tmp_path,
+            system_instance=_DeadLLMSystem(),  # type: ignore[arg-type]
+        )
+    logs = list(tmp_path.glob("*/logs/*.json"))
+    assert len(logs) == MAX_CONSECUTIVE_LLM_UNAVAILABLE
+    assert not list(tmp_path.glob("*/summary.md"))
+
+
+class _SlowAbstainSystem:
+    """Finishes questions out of order so the run must restore question order."""
+
+    name = "slow_abstain"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def answer(self, question: object, workdir: Path) -> tuple[Answer, dict[str, object]]:
+        del workdir
+        self.calls += 1
+        time.sleep(0.05 if self.calls % 2 else 0.0)
+        return Answer.abstain(), {"abstain_reason": f"stub {question.id}"}  # type: ignore[attr-defined]
+
+
+def test_run_eval_workers_keep_question_order(tmp_path: Path) -> None:
+    if not (settings.data_root / "train").exists():
+        pytest.skip(f"Train data folder absent at {settings.data_root / 'train'}")
+
+    sequential = run_evaluation(
+        split="train", subset="poc", system_name="abstain", limit=8, runs_dir=tmp_path / "seq"
+    )
+    parallel = run_evaluation(
+        split="train",
+        subset="poc",
+        limit=8,
+        runs_dir=tmp_path / "par",
+        system_instance=_SlowAbstainSystem(),  # type: ignore[arg-type]
+        workers=4,
+    )
+
+    def ids(run_dir: Path) -> list[str]:
+        lines = (run_dir / "submission.jsonl").read_text(encoding="utf-8").splitlines()
+        return [json.loads(line)["id"] for line in lines]
+
+    assert ids(parallel) == ids(sequential)
+    assert len(list((parallel / "logs").glob("*.json"))) == 8
+    metrics = json.loads((parallel / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["metadata"]["workers"] == 4
+
+
+def test_run_eval_workers_abort_when_the_llm_server_is_down(tmp_path: Path) -> None:
+    if not (settings.data_root / "train").exists():
+        pytest.skip(f"Train data folder absent at {settings.data_root / 'train'}")
+
+    with pytest.raises(SystemExit, match="unavailable"):
+        run_evaluation(
+            split="train",
+            subset="poc",
+            limit=20,
+            runs_dir=tmp_path,
+            system_instance=_DeadLLMSystem(),  # type: ignore[arg-type]
+            workers=4,
+        )
+    assert not list(tmp_path.glob("*/summary.md"))

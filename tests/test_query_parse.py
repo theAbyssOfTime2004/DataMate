@@ -241,6 +241,152 @@ def test_convert_tolerates_consistent_redundancy_only() -> None:
         )
 
 
+def _grounded(parsed: dict[str, Any], question: str) -> Any:
+    return to_query_spec(parsed, AS_OF, RuleConfig(), LunarCalendar({}), question)
+
+
+def test_filter_values_must_be_named_in_the_question() -> None:
+    segment = _parsed(filters=_filters(customer_segment=["Cá nhân"]))
+    for plain in (
+        "Tháng 5/2025 cửa hàng bán đc tổng cộng bao nhiêu tiền?",
+        "Tuần trước ca chiều bán được bao nhiêu",
+    ):
+        assert _grounded(segment, plain).query.filters.customer_segment == []
+    named = _grounded(segment, "doanh thu khach ca nhan thang nay")
+    assert named.query.filters.customer_segment == ["Cá nhân"]
+    with pytest.raises(ConvertError, match="in_scope false"):
+        _grounded(segment, "doanh thu khach si thang nay")
+
+    near = _parsed(filters=_filters(category=["vitamin khoáng chất"]))
+    with pytest.raises(ConvertError, match="in_scope false"):
+        _grounded(near, "Doanh thu thuốc hoạt chất Vitamin C tháng này là bao nhiêu?")
+    unrelated = _parsed(filters=_filters(category=["thực phẩm chức năng"]))
+    with pytest.raises(ConvertError, match="in_scope false"):
+        _grounded(unrelated, "doanh thu thuoc ke don thang 4/2025")
+    cash = _parsed(filters=_filters(payment_method=["cash"], channel=["phone"]))
+    assert _grounded(cash, "dthu cac don tra bang tm qua dien thoaij thang nay")
+
+    coded = _parsed(
+        kind="multi",
+        multi_filters=[
+            _filters(payment_method=["transfer"]),
+            _filters(channel=["store"]),
+            _filters(payment_method=["Thu hộ (COD)"]),
+            _filters(channel=["zalo_oa"]),
+        ],
+    )
+    assert _grounded(coded, "dthu don chuyen khoan, ban tai quay, tra COD, qua Zalo thang nay")
+    afternoon = _parsed(filters=_filters(shift="afternoon"))
+    with pytest.raises(ConvertError, match="shift"):
+        _grounded(afternoon, "thang nay ban duoc bao nhieu")
+
+
+def test_year_wording_must_back_ytd_and_last_year_baselines() -> None:
+    month_to_date = "từ đầu tháng này đến hết hôm nay, doanh thu hơn hay kém cùng kỳ tháng trc mấy %"
+    ytd = _parsed(
+        kind="compare",
+        periods=[{"kind": "ytd"}],
+        compare_kind="same_period_last_year",
+        op="pct_change",
+    )
+    with pytest.raises(ConvertError, match="previous_period"):
+        _grounded(ytd, month_to_date)
+    with pytest.raises(ConvertError, match="ytd"):
+        _grounded(_parsed(periods=[{"kind": "ytd"}]), month_to_date)
+    assert _grounded(_parsed(periods=[{"kind": "ytd"}]), "tu 1/1 den hom nay ban bn")
+    assert _grounded(ytd, "tu dau nam den nay so voi cung ky nam ngoai tang bn %")
+
+
+def test_convert_settles_stray_fields_and_common_shape_slips() -> None:
+    ytd = _convert(_parsed(periods=[{"kind": "ytd", "year": 2026, "date": "2026-08-19"}]))
+    assert isinstance(ytd, ValueQuery)
+    with pytest.raises(ConvertError):
+        _convert(_parsed(periods=[{"kind": "ytd", "year": 2025}]))
+
+    this_month = _convert(_parsed(periods=[{"kind": "month_this", "month": 8, "year": 2026}]))
+    assert isinstance(this_month.query.period, MonthThisExpr)
+    written = _convert(_parsed(periods=[{"kind": "month_this", "month": 2, "year": 2026}]))
+    assert written.query.period.kind == "month"
+    assert (written.query.period.month, written.query.period.year) == (2, 2026)
+    with pytest.raises(ConvertError):
+        _convert(_parsed(periods=[{"kind": "month_this", "month": 2}]))
+
+    both_years = _convert(_parsed(periods=[{"kind": "month", "month": 2, "year": 2025, "year_rel": -1}]))
+    assert both_years.query.period.year == 2025
+
+    july = {"kind": "month", "month": 7, "year": 2026}
+    previous = _convert(
+        _parsed(
+            kind="compare",
+            periods=[july, {"kind": "month_last", "year": 2025}],
+            compare_kind="previous_period",
+            op="pct_change",
+        )
+    )
+    assert isinstance(previous, CompareQuery)
+    assert previous.b.period.start == datetime.date(2026, 6, 1)
+
+    shifts = _convert(
+        _parsed(
+            kind="compare",
+            periods=[{"kind": "week_last"}],
+            compare_kind="previous_period",
+            op="pct_change",
+            filters=_filters(shift="afternoon"),
+            filters_b=_filters(shift="morning"),
+        )
+    )
+    assert isinstance(shifts.b.period, WeekLastExpr)
+    assert shifts.b.filters.shift == "morning"
+
+    pair = _convert(
+        _parsed(
+            kind="series",
+            filters=_filters(payment_method=["Momo"]),
+            filters_b=_filters(payment_method=["Tiền mặt"]),
+        )
+    )
+    assert isinstance(pair, MultiQuery)
+    with pytest.raises(ConvertError, match="name a filter"):
+        _convert(_parsed(kind="multi", multi_filters=[_filters(), _filters()]))
+    with pytest.raises(ConvertError, match="differ"):
+        same = _filters(payment_method=["Momo"])
+        _convert(_parsed(kind="multi", multi_filters=[same, same]))
+
+    today = _convert(_parsed(periods=[{"kind": "today", "date": "2026-08-19", "year": 2026}]))
+    assert today.query.period.kind == "today"
+    month_to_date = _grounded(
+        _parsed(
+            kind="compare",
+            periods=[{"kind": "month_this"}, {"kind": "month_last"}],
+            compare_kind="previous_period",
+            op="pct_change",
+        ),
+        "tu dau thang nay den hom nay so voi cung ky thang truoc tang bn %",
+    )
+    assert month_to_date.b.period.end == datetime.date(2026, 7, 19)
+
+    busiest = _grounded(
+        _parsed(kind="argmax", direction="increasing"),
+        "thang 2/2025 ngay nao cua hang ban dc nhieu tien nhat",
+    )
+    assert (busiest.granularity, busiest.mode) == ("day", "max")
+
+
+def test_threshold_questions_are_out_of_scope_without_a_model_call() -> None:
+    client = FakeClient([])
+    result = parse_question(
+        "Trong tháng 6/2025, bao nhiêu đơn có tiền hàng đạt 41.000 đồng trở lên?",
+        _shop(),
+        client,
+        RuleConfig(),
+        LunarCalendar({}),
+        AS_OF,
+    )
+    assert result.reason == "out_of_scope"
+    assert client.sent == []
+
+
 def test_votes_agree_when_periods_resolve_to_the_same_dates() -> None:
     ctx = _shop()
     rules = RuleConfig()
@@ -261,7 +407,7 @@ def test_votes_agree_when_periods_resolve_to_the_same_dates() -> None:
         op="pct_change",
     )
     compared = parse_question(
-        "4/2026 vs 4/2025", ctx, FakeClient([explicit, relative]), rules, cal, AS_OF
+        "4/2026 vs cung ky nam truoc", ctx, FakeClient([explicit, relative]), rules, cal, AS_OF
     )
     assert isinstance(compared.spec, CompareQuery)
 

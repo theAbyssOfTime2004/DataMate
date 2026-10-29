@@ -8,9 +8,10 @@ from typing import Any
 from pydantic import TypeAdapter, ValidationError
 
 from datamate.config import settings
-from datamate.llm.client import LLMError
+from datamate.llm.client import LLMError, LLMUnavailable
 from datamate.query.context import ShopContext
 from datamate.query.convert import ConvertError, to_query_spec
+from datamate.query.grounding import QuestionText
 from datamate.query.parse_schema import PERIOD_KINDS, TOP_LEVEL_KEYS, parsed_question_schema
 from datamate.query.prompts import FEW_SHOT_SETS, build_messages
 from datamate.query.spec import QuerySpec
@@ -48,6 +49,8 @@ def parse_question(
 ) -> ParseResult:
     """Parse one question. as_of is the question's 'today', not the shop's data end."""
     vote_count = settings.parse_votes if votes is None else votes
+    if QuestionText(question).has_threshold():
+        return ParseResult(spec=None, reason="out_of_scope", attempts=[])
     products = ctx.product_candidates(question)
     schema = parsed_question_schema(ctx, products)
     attempts: list[ParseAttempt] = []
@@ -56,6 +59,7 @@ def parse_question(
         messages, dropped = _fit_messages(question, as_of, ctx, few_shot_set, client)
         outcomes.append(
             _vote(
+                question,
                 few_shot_set,
                 messages,
                 schema,
@@ -94,6 +98,7 @@ def _prompt_text(messages: list[dict[str, str]]) -> str:
 
 
 def _vote(
+    question: str,
     few_shot_set: int,
     messages: list[dict[str, str]],
     schema: dict[str, Any],
@@ -111,7 +116,7 @@ def _vote(
     if raw.get("in_scope") is False:
         return "out", None
     try:
-        return "ok", to_query_spec(raw, as_of, rules, cal)
+        return "ok", to_query_spec(raw, as_of, rules, cal, question)
     except ConvertError as exc:
         attempts[-1] = ParseAttempt(few_shot_set, raw, str(exc), few_shots_dropped)
         retried = _retry(messages, raw, str(exc))
@@ -127,7 +132,7 @@ def _vote(
             attempts.append(ParseAttempt(few_shot_set, second, None, few_shots_dropped))
             return "out", None
         try:
-            spec = to_query_spec(second, as_of, rules, cal)
+            spec = to_query_spec(second, as_of, rules, cal, question)
         except ConvertError as retry_exc:
             attempts.append(ParseAttempt(few_shot_set, second, str(retry_exc), few_shots_dropped))
             return "fail", None
@@ -157,6 +162,8 @@ def _call(
             max_tokens=_MAX_TOKENS,
             required_keys=list(TOP_LEVEL_KEYS),
         )
+    except LLMUnavailable:
+        raise
     except LLMError as exc:
         return None, str(exc)
     if not isinstance(raw, dict):

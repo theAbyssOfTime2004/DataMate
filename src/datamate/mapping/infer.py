@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from datamate.config import settings
 from datamate.io.profile import BusinessProfile, TableProfile, render_card
 from datamate.io.raw import BusinessRaw, RawTable
-from datamate.llm.client import LLMError
+from datamate.llm.client import LLMError, LLMUnavailable
 from datamate.mapping.fields import FIELD_DOCS, REQUIRED_FIELDS
 from datamate.mapping.model import (
     Entity,
@@ -401,15 +401,11 @@ def _step_b_schema(
     }
 
 
-def _collect_distinct_counts(
-    rt: RawTable, col_name: str, limit: int = 50
-) -> list[tuple[str, int]]:
+def _collect_distinct_counts(rt: RawTable, col_name: str, limit: int = 50) -> list[tuple[str, int]]:
     if col_name not in rt.df.columns:
         return []
     vals: list[str] = [
-        v.strip()
-        for v in rt.df[col_name].tolist()
-        if isinstance(v, str) and v.strip()
+        v.strip() for v in rt.df[col_name].tolist() if isinstance(v, str) and v.strip()
     ]
     counts = Counter(vals)
     sorted_items = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
@@ -692,6 +688,8 @@ def infer_mapping(
                 )
                 steps_log.append(log_a)
                 last_ans_a = ans_a
+            except LLMUnavailable:
+                raise
             except LLMError as exc:
                 errors.append(f"Step A LLMError: {exc}")
                 return False
@@ -720,7 +718,9 @@ def infer_mapping(
         ent: Entity, c_tables: dict[Entity, str], o_source: str
     ) -> str | None:
         if ent == "orders":
-            return c_tables.get("order_lines") if o_source == "order_lines" else c_tables.get("orders")
+            return (
+                c_tables.get("order_lines") if o_source == "order_lines" else c_tables.get("orders")
+            )
         return c_tables.get(ent)
 
     def _run_step_b(entity: Entity, repair_suffix: str | None = None) -> bool:
@@ -746,6 +746,8 @@ def infer_mapping(
             )
             steps_log.append(log_b)
             last_ans_b[entity] = ans_b
+        except LLMUnavailable:
+            raise
         except LLMError as exc:
             errors.append(f"Step B_{entity} LLMError: {exc}")
             return False
@@ -801,6 +803,8 @@ def infer_mapping(
             )
             steps_log.append(log_c)
             last_ans_c = ans_c
+        except LLMUnavailable:
+            raise
         except LLMError as exc:
             errors.append(f"Step C LLMError: {exc}")
             return False
@@ -829,9 +833,7 @@ def infer_mapping(
         ord_cols = entity_columns.get("orders", {})
         # Take candidates from orders.customer_name if mapped, else customer_id
         cust_col = ord_cols.get("customer_name") or ord_cols.get("customer_id")
-        cust_counts = (
-            _collect_walk_in_candidates(ord_rt, cust_col, limit=30) if cust_col else []
-        )
+        cust_counts = _collect_walk_in_candidates(ord_rt, cust_col, limit=30) if cust_col else []
         cand_vals = [v for v, _ in cust_counts]
 
         qty_col = entity_columns.get("order_lines", {}).get("qty")
@@ -851,6 +853,8 @@ def infer_mapping(
             )
             steps_log.append(log_d)
             last_ans_d = ans_d
+        except LLMUnavailable:
+            raise
         except LLMError as exc:
             errors.append(f"Step D LLMError: {exc}")
             return False
@@ -863,9 +867,7 @@ def infer_mapping(
             walk_in_values = [
                 v
                 for v in raw_wiv
-                if isinstance(v, str)
-                and not is_id_or_phone_like(v)
-                and v in allowed_cands
+                if isinstance(v, str) and not is_id_or_phone_like(v) and v in allowed_cands
             ]
         rr = ans_d.get("return_rule", "status")
         return_rule = "negative_qty" if rr == "negative_qty" else "status"
@@ -969,10 +971,7 @@ def infer_mapping(
                 new_eff = _effective_table_for_entity(ent, chosen_tables, orders_source)
                 if new_eff is None:
                     entity_columns.pop(ent, None)
-                elif (
-                    new_eff != old_eff
-                    or (ent == "orders" and orders_source != old_orders_source)
-                ):
+                elif new_eff != old_eff or (ent == "orders" and orders_source != old_orders_source):
                     rerun_b_from_a.add(ent)
 
             if "order_lines" in rerun_b_from_a or "orders" in rerun_b_from_a:
@@ -985,18 +984,24 @@ def infer_mapping(
             b_step_key = f"B_{ent}"
             if b_step_key in problems_by_step and ent_typed not in rerun_b_from_a:
                 combined_problem = " ; ".join(problems_by_step[b_step_key])
-                prev_json = json.dumps(
-                    last_ans_b.get(ent_typed, {}), ensure_ascii=False
-                )
+                prev_json = json.dumps(last_ans_b.get(ent_typed, {}), ensure_ascii=False)
                 suffix = f"Previous answer: {prev_json}. Problem: {combined_problem}. Fix it."
                 if not _run_step_b(ent_typed, repair_suffix=suffix):
                     return InferResult(
-                        mapping=mapping, steps=steps_log, errors=errors, issues=issues, canonical=canon
+                        mapping=mapping,
+                        steps=steps_log,
+                        errors=errors,
+                        issues=issues,
+                        canonical=canon,
                     )
             elif ent_typed in rerun_b_from_a:
                 if not _run_step_b(ent_typed, repair_suffix=None):
                     return InferResult(
-                        mapping=mapping, steps=steps_log, errors=errors, issues=issues, canonical=canon
+                        mapping=mapping,
+                        steps=steps_log,
+                        errors=errors,
+                        issues=issues,
+                        canonical=canon,
                     )
 
         # Run Step C if flagged, or if orders table / status column changed
@@ -1083,5 +1088,6 @@ def infer_mapping(
         mapping=mapping,
         steps=steps_log,
         errors=remaining_errs,
-        issues=issues, canonical=canon,
+        issues=issues,
+        canonical=canon,
     )

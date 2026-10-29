@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from datamate.config import settings
-from datamate.llm import LLMClient, LLMError
+from datamate.llm import LLMClient, LLMError, LLMUnavailable
 
 
 def test_chat_json_request_body_and_disk_cache(tmp_path: Path) -> None:
@@ -138,6 +138,42 @@ def test_chat_json_raises_llm_error_on_500(tmp_path: Path) -> None:
     client.close()
 
 
+def test_unreachable_or_5xx_server_is_unavailable_not_a_bad_answer(tmp_path: Path) -> None:
+    schema = {"type": "object", "properties": {"x": {"type": "integer"}}, "required": ["x"]}
+    messages = [{"role": "user", "content": "hi"}]
+
+    def overloaded(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="busy")
+
+    def refused(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    def bad_request(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text="prompt too long")
+
+    for handler in (overloaded, refused):
+        client = LLMClient(
+            base_url="http://mock-server:8000/v1",
+            cache_dir=tmp_path,
+            cache_enabled=False,
+            transport=httpx.MockTransport(handler),
+        )
+        with pytest.raises(LLMUnavailable):
+            client.chat_json(messages, schema=schema, schema_name="down")
+        client.close()
+
+    client = LLMClient(
+        base_url="http://mock-server:8000/v1",
+        cache_dir=tmp_path,
+        cache_enabled=False,
+        transport=httpx.MockTransport(bad_request),
+    )
+    with pytest.raises(LLMError) as caught:
+        client.chat_json(messages, schema=schema, schema_name="bad")
+    assert not isinstance(caught.value, LLMUnavailable)
+    client.close()
+
+
 def test_count_tokens_endpoint_and_fallback(tmp_path: Path) -> None:
     tokenize_calls = 0
 
@@ -219,9 +255,7 @@ def test_chat_json_salvages_trailing_whitespace_and_unclosed_object(tmp_path: Pa
         return httpx.Response(
             200,
             json={
-                "choices": [
-                    {"message": {"content": '{"a": '}, "finish_reason": "length"}
-                ],
+                "choices": [{"message": {"content": '{"a": '}, "finish_reason": "length"}],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 512},
             },
         )
@@ -249,9 +283,7 @@ def test_salvaged_answer_missing_optional_key_becomes_null(tmp_path: Path) -> No
         return httpx.Response(
             200,
             json={
-                "choices": [
-                    {"message": {"content": content}, "finish_reason": "length"}
-                ],
+                "choices": [{"message": {"content": content}, "finish_reason": "length"}],
                 "usage": {"prompt_tokens": 3, "completion_tokens": 512},
             },
         )
@@ -336,7 +368,7 @@ def test_chat_json_retries_httpx_timeout_once(tmp_path: Path) -> None:
         cache_enabled=False,
         transport=httpx.MockTransport(always_timeout),
     )
-    with pytest.raises(LLMError, match="timed out"):
+    with pytest.raises(LLMUnavailable, match="timed out"):
         broken.chat_json(messages, schema=schema, schema_name="retry_fail")
     assert len(both_failed) == 2
     assert len(broken.usage_log) == 1

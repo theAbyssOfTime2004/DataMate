@@ -1,8 +1,9 @@
-from datamate.llm.client import LLMClient, LLMError, UsageEntry, get_client
+from datamate.llm.client import LLMClient, LLMError, LLMUnavailable, UsageEntry, get_client
 
 __all__ = [
     "LLMClient",
     "LLMError",
+    "LLMUnavailable",
     "UsageEntry",
     "get_client",
 ]

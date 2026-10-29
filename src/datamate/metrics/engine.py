@@ -86,6 +86,7 @@ class MetricEngine:
         self.data_start = data_start
         self.data_end = data_end
         self._present: dict[tuple[str, str], bool] = {}
+        self._keys_by_name: dict[str, set[str]] | None = None
 
     def compute(self, query: MetricQuery, as_of: datetime.date) -> MetricValue:
         cov, window = self._window(query.period, as_of)
@@ -238,10 +239,7 @@ class MetricEngine:
 
     def _cancel_count(self, period: DateRange, filters: Filters) -> tuple[int, str]:
         where, params = self._where(period, filters, revenue=False, joined_lines=False)
-        sql = (
-            "SELECT COUNT(DISTINCT o.order_id) FROM orders o "
-            f"WHERE {where} AND o.status = ?"
-        )
+        sql = f"SELECT COUNT(DISTINCT o.order_id) FROM orders o WHERE {where} AND o.status = ?"
         return _as_int(self._scalar(sql, [*params, "cancelled"])), sql
 
     def _cancel_rate(self, period: DateRange, filters: Filters) -> tuple[Decimal, str]:
@@ -297,9 +295,13 @@ class MetricEngine:
                 "FROM order_lines l JOIN orders o ON o.order_id = l.order_id "
                 f"WHERE {where} GROUP BY 1"
             )
-            return [(str(row[0]), Decimal(row[1])) for row in self.con.execute(sql, params).fetchall()]
+            return [
+                (str(row[0]), Decimal(row[1])) for row in self.con.execute(sql, params).fetchall()
+            ]
         if metric in {"order_count", "cancel_count"}:
-            where, params = self._where(period, filters, revenue=metric == "order_count", joined_lines=False)
+            where, params = self._where(
+                period, filters, revenue=metric == "order_count", joined_lines=False
+            )
             status_sql = " AND o.status = ?" if metric == "cancel_count" else ""
             status_params = ["cancelled"] if metric == "cancel_count" else []
             sql = (
@@ -333,7 +335,9 @@ class MetricEngine:
     ) -> list[tuple[str, Decimal]]:
         if share:
             part_where, part_params = self._where(period, filters, revenue=True, joined_lines=True)
-            whole_where, whole_params = self._where(period, Filters(), revenue=True, joined_lines=True)
+            whole_where, whole_params = self._where(
+                period, Filters(), revenue=True, joined_lines=True
+            )
             part_sql = (
                 f"SELECT {label} AS grain, COALESCE(SUM(l.line_amount), 0) "
                 "FROM order_lines l JOIN orders o ON o.order_id = l.order_id "
@@ -344,9 +348,13 @@ class MetricEngine:
                 "FROM order_lines l JOIN orders o ON o.order_id = l.order_id "
                 f"WHERE {whole_where} GROUP BY 1"
             )
-            parts = {str(row[0]): Decimal(row[1]) for row in self.con.execute(part_sql, part_params).fetchall()}
+            parts = {
+                str(row[0]): Decimal(row[1])
+                for row in self.con.execute(part_sql, part_params).fetchall()
+            }
             wholes = {
-                str(row[0]): Decimal(row[1]) for row in self.con.execute(whole_sql, whole_params).fetchall()
+                str(row[0]): Decimal(row[1])
+                for row in self.con.execute(whole_sql, whole_params).fetchall()
             }
             return [
                 (grain, parts.get(grain, Decimal(0)) * Decimal(100) / total)
@@ -431,8 +439,12 @@ class MetricEngine:
                 label = normalize_label(raw)
                 if label is None:
                     continue
-                arms.append("(l.product_key = ? OR l.product_id = ?)")
-                params.extend([label, raw])
+                # A display name matches its normalized key (shops without product codes)
+                # and every product_key sold under that name (shops whose key is a code).
+                keys = sorted({label} | self._product_keys_for(label))
+                marks = ", ".join("?" for _ in keys)
+                arms.append(f"(l.product_key IN ({marks}) OR l.product_id = ?)")
+                params.extend([*keys, raw])
             parts.append("(" + " OR ".join(arms) + ")" if arms else "FALSE")
         if filters.category:
             marks = ", ".join("?" for _ in filters.category)
@@ -461,6 +473,20 @@ class MetricEngine:
             raise Unanswerable("product")
         if filters.shift is not None and not self._recorded("orders", "order_ts"):
             raise Unanswerable("shift")
+
+    def _product_keys_for(self, label: str) -> set[str]:
+        if self._keys_by_name is None:
+            rows = self.con.execute(
+                "SELECT DISTINCT product_key, product_name FROM order_lines "
+                "WHERE product_key IS NOT NULL AND product_name IS NOT NULL"
+            ).fetchall()
+            found: dict[str, set[str]] = {}
+            for key, name in rows:
+                name_label = normalize_label(str(name))
+                if name_label is not None:
+                    found.setdefault(name_label, set()).add(str(key))
+            self._keys_by_name = found
+        return self._keys_by_name.get(label, set())
 
     def _recorded(self, table: str, column: str) -> bool:
         key = (table, column)

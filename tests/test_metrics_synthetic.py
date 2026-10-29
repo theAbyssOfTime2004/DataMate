@@ -94,8 +94,24 @@ def _line(
 def _shop_rows() -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     orders = [
         _order("o1", datetime.date(2026, 6, 1), 8, 0, "completed"),
-        _order("o2", datetime.date(2026, 6, 1), 15, 0, "completed", customer_key="walk-in", walk_in=True),
-        _order("o3", datetime.date(2026, 6, 2), 9, 0, "cancelled", customer_key="c2", payment="transfer"),
+        _order(
+            "o2",
+            datetime.date(2026, 6, 1),
+            15,
+            0,
+            "completed",
+            customer_key="walk-in",
+            walk_in=True,
+        ),
+        _order(
+            "o3",
+            datetime.date(2026, 6, 2),
+            9,
+            0,
+            "cancelled",
+            customer_key="c2",
+            payment="transfer",
+        ),
         _order("o4", datetime.date(2026, 6, 3), 10, 0, "returned", has_return=True),
         _order(
             "o5",
@@ -133,16 +149,30 @@ def _shop_rows() -> tuple[list[dict[str, object]], list[dict[str, object]]]:
 
 def _products() -> list[dict[str, object]]:
     return [
-        {"product_key": "coca cola 330ml", "product_name": "Coca Cola 330ml", "category": "đồ uống"},
+        {
+            "product_key": "coca cola 330ml",
+            "product_name": "Coca Cola 330ml",
+            "category": "đồ uống",
+        },
         {"product_key": "paracetamol", "product_name": "Paracetamol", "category": "thuốc"},
         {"product_key": "special", "product_name": "special", "category": "khác"},
         {"product_key": "other", "product_name": "other", "category": "khác"},
         {"product_key": "x", "product_name": "x", "category": "khác"},
-        {"product_key": "SKU9", "product_id": "SKU9", "product_name": "Hàng mã", "category": "khác"},
+        {
+            "product_key": "SKU9",
+            "product_id": "SKU9",
+            "product_name": "Hàng mã",
+            "category": "khác",
+        },
     ]
 
 
-def _write(path: object, orders: list[dict[str, object]], lines: list[dict[str, object]], customers: list[dict[str, object]]) -> None:
+def _write(
+    path: object,
+    orders: list[dict[str, object]],
+    lines: list[dict[str, object]],
+    customers: list[dict[str, object]],
+) -> None:
     data = CanonicalData(
         orders=_frame(ORDERS_COLUMNS, orders),
         order_lines=_frame(ORDER_LINES_COLUMNS, lines),
@@ -154,14 +184,21 @@ def _write(path: object, orders: list[dict[str, object]], lines: list[dict[str, 
     write_duckdb(data, path)  # type: ignore[arg-type]
 
 
-def _engine(path: object, orders: list[dict[str, object]], lines: list[dict[str, object]], customers: list[dict[str, object]]) -> tuple[MetricEngine, duckdb.DuckDBPyConnection]:
+def _engine(
+    path: object,
+    orders: list[dict[str, object]],
+    lines: list[dict[str, object]],
+    customers: list[dict[str, object]],
+) -> tuple[MetricEngine, duckdb.DuckDBPyConnection]:
     _write(path, orders, lines, customers)
     con = duckdb.connect(str(path), read_only=True)
     engine = MetricEngine(con, RuleConfig(), LunarCalendar({}), DATA_START, DATA_END)
     return engine, con
 
 
-def _value(metric: str, period: object, answer_type: str = "number", **filters: object) -> ValueQuery:
+def _value(
+    metric: str, period: object, answer_type: str = "number", **filters: object
+) -> ValueQuery:
     return ValueQuery(
         answer_type=answer_type,  # type: ignore[arg-type]
         query=MetricQuery(metric=metric, period=period, filters=Filters(**filters)),  # type: ignore[arg-type]
@@ -235,7 +272,8 @@ def test_revenue_definition_and_filters(engine: MetricEngine) -> None:
 
     january = MonthExpr(month=1, year=2026)
     assert engine.answer(_value("revenue", january, product=["SKU9"]), AS_OF).answer == 100
-    assert engine.answer(_value("revenue", january, product=["Hàng mã"]), AS_OF).answer == 0
+    # The parser sends display names; they must reach products keyed by a code.
+    assert engine.answer(_value("revenue", january, product=["Hàng mã"]), AS_OF).answer == 100
 
 
 def test_sql_keeps_filter_values_in_parameters(engine: MetricEngine) -> None:
@@ -290,7 +328,9 @@ def test_compare_series_multi_trend_and_argmax(engine: MetricEngine) -> None:
     multi = engine.answer(
         MultiQuery(
             queries=[
-                MetricQuery(metric="revenue", period=JUNE, filters=Filters(payment_method=["cash"])),
+                MetricQuery(
+                    metric="revenue", period=JUNE, filters=Filters(payment_method=["cash"])
+                ),
                 MetricQuery(metric="revenue", period=JUNE, filters=Filters(channel=["zalo"])),
             ]
         ),

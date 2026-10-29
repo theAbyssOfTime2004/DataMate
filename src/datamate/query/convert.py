@@ -5,6 +5,7 @@ import unicodedata
 
 from pydantic import ValidationError
 
+from datamate.query.grounding import QuestionText
 from datamate.query.parse_schema import (
     COMPARE_KINDS,
     FILTER_KEYS,
@@ -75,6 +76,12 @@ _RELATIVE_COMPARE = frozenset(
     {"previous_period", "same_period_last_year", "before_tet_same_length"}
 )
 _SHIFTS = frozenset({"morning", "afternoon"})
+_GROUNDED_FILTERS = ("payment_method", "channel", "customer_segment", "category")
+_PREVIOUS_LABELS = frozenset({"yesterday", "week_last", "month_last"})
+_TO_DATE_KINDS = frozenset({"today", "week_this", "month_this", "ytd"})
+_DAY_WORDS = ("ngay nao", "hom nao", "ngay may")
+_MONTH_WORDS = ("thang nao", "thang may")
+_MIN_WORDS = ("it nhat", "thap nhat", "kem nhat", "e nhat", "cham nhat")
 
 
 class ConvertError(ValueError):
@@ -86,18 +93,41 @@ def to_query_spec(
     as_of: datetime.date,
     rules: RuleConfig,
     cal: LunarCalendar,
+    question: str | None = None,
 ) -> QuerySpec:
+    """With the question text, filter values and year wording must be grounded in it."""
+    text = QuestionText(question) if question is not None else None
     kind = _choice(parsed.get("kind"), QUESTION_KINDS, "kind")
     metric = _choice(parsed.get("metric"), METRICS, "metric")
-    periods = _periods(parsed.get("periods"))
     compare_kind = _optional_choice(parsed.get("compare_kind"), COMPARE_KINDS, "compare_kind")
+    raw_periods = _drop_written_baseline(parsed.get("periods"), compare_kind, text)
+    periods = _periods(raw_periods, as_of)
     op = _optional_choice(parsed.get("op"), ("pct_change", "diff"), "op")
-    filters = _filters(parsed.get("filters"), "filters")
-    filters_b = parsed.get("filters_b")
+    raw_filters = _ground_filters(text, parsed.get("filters"), "filters")
+    filters = _filters(raw_filters, "filters")
+    filters_b = _ground_filters(text, parsed.get("filters_b"), "filters_b")
     multi_filters = parsed.get("multi_filters")
+    if isinstance(multi_filters, list):
+        multi_filters = [_ground_filters(text, item, "multi_filters") for item in multi_filters]
     direction = _optional_choice(parsed.get("direction"), ("increasing", "decreasing"), "direction")
     granularity = _optional_choice(parsed.get("granularity"), ("day", "month"), "granularity")
     mode = _optional_choice(parsed.get("mode"), ("max", "min"), "mode")
+
+    if (
+        kind in ("multi", "series")
+        and filters_b is not None
+        and not _has_items(multi_filters)
+        and len(periods) == 1
+    ):
+        # "doanh thu tiền mặt và doanh thu COD": two filtered values written as a pair.
+        kind, multi_filters, filters_b = "multi", [raw_filters, filters_b], None
+    if kind == "argmax" and text is not None:
+        # Trend wording on a "which day" question adds nothing; the words decide the rest.
+        direction = None
+        granularity = granularity or _argmax_granularity(text)
+        mode = mode or ("min" if any(text.has_phrase(w) for w in _MIN_WORDS) else "max")
+    if text is not None:
+        _check_period_wording(text, raw_periods, compare_kind)
 
     _reject_unused(
         kind,
@@ -152,7 +182,16 @@ def _compare(
     if op is None:
         raise ConvertError("compare requires op")
     if compare_kind in _RELATIVE_COMPARE and filters_b is not None:
-        raise ConvertError("compare cannot set both a relative compare_kind and filters_b")
+        if _filters(filters_b, "filters_b") == filters:
+            filters_b = None
+        elif len(periods) == 1:
+            # "Tuần trước ca chiều so với ca sáng": two filters over the one period.
+            compare_kind = None
+        else:
+            raise ConvertError(
+                "compare cannot set both a relative compare_kind and filters_b; to compare "
+                "two filters over one period, set compare_kind null and give one period"
+            )
     if compare_kind == "explicit":
         _expect_count(periods, 2, "explicit compare")
         period_a: PeriodExpr = periods[0]
@@ -248,6 +287,10 @@ def _multi(metric: Metric, periods: list[PeriodExpr], raw_filters: object) -> Mu
     if not isinstance(raw_filters, list) or not raw_filters:
         raise ConvertError("multi requires multi_filters")
     queries = [_query(metric, periods[0], _filters(item, "multi_filters")) for item in raw_filters]
+    if any(query.filters == Filters() for query in queries):
+        raise ConvertError("each multi_filters entry must name a filter value")
+    if len({query.filters.model_dump_json() for query in queries}) != len(queries):
+        raise ConvertError("multi_filters entries must differ")
     return MultiQuery(queries=queries)
 
 
@@ -255,19 +298,46 @@ def _query(metric: Metric, period: PeriodExpr, filters: Filters) -> MetricQuery:
     return MetricQuery(metric=metric, period=period, filters=filters)
 
 
-def _periods(raw: object) -> list[PeriodExpr]:
+def _periods(raw: object, as_of: datetime.date) -> list[PeriodExpr]:
     if not isinstance(raw, list):
         raise ConvertError("periods must be a list")
-    return [_period_expr(item) for item in raw]
+    return [_period_expr(item, as_of) for item in raw]
 
 
-def _period_expr(raw: object) -> PeriodExpr:
+def _drop_written_baseline(
+    raw: object, compare_kind: str | None, text: QuestionText | None
+) -> object:
+    """'So với tháng trước đó, tháng 7/2026...': the model often lists tháng trước as a
+    second period next to an explicit month. previous_period derives that baseline, so a
+    bare previous-period label beside an explicit period is dropped, whatever stray
+    fields it carries."""
+    if compare_kind != "previous_period" or not isinstance(raw, list) or len(raw) != 2:
+        return raw
+    kinds = [item.get("kind") if isinstance(item, dict) else None for item in raw]
+    labels = [kind in _PREVIOUS_LABELS for kind in kinds]
+    if labels.count(True) != 1:
+        return raw
+    other = kinds[labels.index(False)]
+    if other not in PERIOD_KINDS:
+        return raw
+    # Next to tháng này, tháng trước is only a derived baseline when the question asks
+    # for the same stretch of days (cùng kỳ / cùng số ngày).
+    same_stretch = text is not None and (
+        text.has_phrase("cung ky") or text.has_phrase("cung so ngay")
+    )
+    if other in _TO_DATE_KINDS and not same_stretch:
+        return raw
+    return [raw[labels.index(False)]]
+
+
+def _period_expr(raw: object, as_of: datetime.date) -> PeriodExpr:
     if not isinstance(raw, dict):
         raise ConvertError("period must be an object")
     kind = raw.get("kind")
     if kind not in PERIOD_KINDS:
         raise ConvertError(f"unknown period kind {kind!r}")
     raw = _merge_count_alias(str(kind), raw)
+    kind, raw = _settle_redundant_fields(str(kind), raw, as_of)
     allowed = _PERIOD_FIELDS[str(kind)]
     for field, value in raw.items():
         if field == "kind" or value is None:
@@ -295,6 +365,125 @@ def _merge_count_alias(kind: str, raw: dict[str, object]) -> dict[str, object]:
         raise ConvertError(f"period {kind}: {used} and {alias} disagree")
     merged[alias] = None
     return merged
+
+
+def _settle_redundant_fields(
+    kind: str, raw: dict[str, object], as_of: datetime.date
+) -> tuple[str, dict[str, object]]:
+    """Drop fields that only restate the kind (ytd with this year, month_this with this
+    month). An explicit month and year on month_this/month_last win over the label."""
+    settled = dict(raw)
+    if settled.get("year") is not None and settled.get("year_rel") is not None:
+        settled["year_rel"] = None  # the written year is the more reliable of the two
+    if kind in ("month_this", "month_last"):
+        anchor = as_of.replace(day=1)
+        if kind == "month_last":
+            anchor = (anchor - datetime.timedelta(days=1)).replace(day=1)
+        month, year, year_rel = settled.get("month"), settled.get("year"), settled.get("year_rel")
+        if month is None and year is None and year_rel is None:
+            return kind, settled
+        consistent = (
+            month in (None, anchor.month)
+            and year in (None, anchor.year)
+            and (year_rel is None or year_rel == anchor.year - as_of.year)
+        )
+        if consistent:
+            return kind, {**settled, "month": None, "year": None, "year_rel": None}
+        if month is not None and year is not None:
+            return "month", {**settled, "kind": "month"}
+        return kind, settled
+    if kind in ("today", "yesterday"):
+        day = as_of if kind == "today" else as_of - datetime.timedelta(days=1)
+        expected_day: dict[str, object] = {
+            "date": day,
+            "start": day,
+            "end": day,
+            "year": day.year,
+            "year_rel": day.year - as_of.year,
+            "month": day.month,
+        }
+        return kind, _clear_if_restated(kind, settled, expected_day)
+    if kind == "ytd":
+        expected: dict[str, object] = {
+            "year": as_of.year,
+            "year_rel": 0,
+            "date": as_of,
+            "end": as_of,
+            "start": datetime.date(as_of.year, 1, 1),
+        }
+        return kind, _clear_if_restated(kind, settled, expected)
+    return kind, settled
+
+
+def _clear_if_restated(
+    kind: str, raw: dict[str, object], expected: dict[str, object]
+) -> dict[str, object]:
+    for field, value in expected.items():
+        found = raw.get(field)
+        if found is None:
+            continue
+        if field in ("date", "end", "start"):
+            try:
+                found = _as_date(found, field)
+            except ConvertError:
+                return raw
+        if found != value:
+            return raw
+    return {**raw, **dict.fromkeys(expected)}
+
+
+def _ground_filters(text: QuestionText | None, raw: object, label: str) -> object:
+    """Drop stray filter values; reject a value that stands in for an unlisted condition."""
+    if text is None or not isinstance(raw, dict):
+        return raw
+    kept = dict(raw)
+    for field in _GROUNDED_FILTERS:
+        values = raw.get(field)
+        if not isinstance(values, list):
+            continue
+        chosen: list[object] = []
+        for value in values:
+            if not isinstance(value, str) or text.mentions_value(value):
+                chosen.append(value)
+            elif not text.is_stray(field, value):
+                raise ConvertError(
+                    f"{label}.{field} {value!r} is not what the question says. If no listed "
+                    "value matches the question's condition, set in_scope false"
+                )
+        kept[field] = chosen
+    shift = raw.get("shift")
+    if isinstance(shift, str) and not text.mentions_shift(shift):
+        raise ConvertError(f"{label}.shift {shift!r} is not mentioned in the question")
+    return kept
+
+
+def _check_period_wording(
+    text: QuestionText, raw_periods: object, compare_kind: str | None
+) -> None:
+    periods = raw_periods if isinstance(raw_periods, list) else []
+    # Two written periods are checked against each other by _asked_period instead.
+    if compare_kind == "same_period_last_year" and len(periods) == 1 and not text.mentions_year():
+        raise ConvertError(
+            "same_period_last_year needs năm in the question; cùng kỳ tháng trước or "
+            "tháng trước is previous_period"
+        )
+    for item in periods:
+        if (
+            isinstance(item, dict)
+            and item.get("kind") == "ytd"
+            and not (text.mentions_year() or text.mentions_jan_first())
+        ):
+            raise ConvertError(
+                "ytd needs từ đầu năm or 1/1 in the question; use the period the question names"
+            )
+
+
+def _argmax_granularity(text: QuestionText) -> str | None:
+    if any(text.has_phrase(phrase) for phrase in _DAY_WORDS):
+        return "day"
+    if any(text.has_phrase(phrase) for phrase in _MONTH_WORDS):
+        return "month"
+    return None
 
 
 def _build_period(kind: str, raw: dict[str, object]) -> PeriodExpr:
