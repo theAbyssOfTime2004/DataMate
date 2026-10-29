@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     llm_prompt_budget_tokens: int = 6000
     llm_cache_enabled: bool = True
     seed: int = 20261116
+    parse_votes: int = 2
 
     @field_validator("cache_dir", "runs_dir", mode="after")
     @classmethod
