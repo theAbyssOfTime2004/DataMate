@@ -14,7 +14,8 @@ FIELD_DOCS: dict[Entity, dict[str, str]] = {
             "used for morning/afternoon shift or peak hour"
         ),
         "status": (
-            "raw order status text (will be mapped to completed, cancelled, returned, shipping)"
+            "order state only (done / cancelled / returned / delivering); "
+            "leave null if there is no such column — do not use a free-text note"
         ),
         "customer_id": "customer code / identifier (only when the shop uses customer codes)",
         "customer_name": "customer name recorded on the order",
@@ -75,5 +76,5 @@ FIELD_DOCS: dict[Entity, dict[str, str]] = {
 
 REQUIRED_FIELDS: dict[str, set[str]] = {
     "order_lines": {"line_amount"},
-    "orders": {"order_date", "status"},
+    "orders": {"order_date"},
 }

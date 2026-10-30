@@ -444,6 +444,23 @@ def _synthetic_order_id(file_name: str, sheet_name: str | None, row_no: int) -> 
     return f"{file_name}|{sheet}|{row_no}"
 
 
+_BLANK_STATUS_SHARE = 0.5
+
+
+def _fill_blank_status_as_completed(order_rows: list[dict[str, Any]]) -> bool:
+    """A status column that is blank for most orders only notes the exceptions (returns,
+    cancellations); a blank there means an ordinary completed order."""
+    if not order_rows:
+        return False
+    blank = [row for row in order_rows if row["status_raw"] is None]
+    if len(blank) < _BLANK_STATUS_SHARE * len(order_rows):
+        return False
+    for row in blank:
+        if row["status"] is None:
+            row["status"] = "completed"
+    return True
+
+
 def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
     warnings: list[str] = []
     notes: list[str] = []
@@ -730,6 +747,9 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
 
     status_overridden_by_return = 0
     order_rows: list[dict[str, Any]] = []
+    has_status_column = "status" in orders_tm.columns
+    if not has_status_column:
+        notes.append("no status column: all orders completed")
 
     year_hint_cache: dict[tuple[str | None, str], int | None] = {}
 
@@ -815,15 +835,18 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
                     elif len(set(non_neg_vals)) > 1:
                         conflicts[fname] += 1
 
-            status_raw = resolved_fields["status"]
-            norm_st = normalize_label(status_raw) if status_raw is not None else None
-            mapped_status: str | None = None
-            if norm_st is not None:
-                mapped_status = norm_status_map.get(norm_st)
-                if mapped_status is None:
-                    unmapped_statuses[status_raw] += 1
-            if "status" in ocols:
+            if has_status_column:
+                status_raw = resolved_fields["status"]
+                norm_st = normalize_label(status_raw) if status_raw is not None else None
+                mapped_status: str | None = None
+                if norm_st is not None:
+                    mapped_status = norm_status_map.get(norm_st)
+                    if mapped_status is None:
+                        unmapped_statuses[status_raw] += 1
                 tracker.record("orders.status", status_raw, mapped_status is not None)
+            else:
+                status_raw = None
+                mapped_status = "completed"
 
             has_ret = (mapped_status == "returned") or (
                 mapping.return_rule == "negative_qty" and oid in orders_with_negative_qty
@@ -893,15 +916,19 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
                 ots = parse_timestamp(ots_raw, default_year=yh)
                 tracker.record("orders.order_ts", ots_raw, ots is not None)
 
-                status_raw_cell = s_row[c_o_st] if c_o_st is not None else None
-                status_raw = _strip_str(status_raw_cell)
-                norm_st = normalize_label(status_raw) if status_raw is not None else None
-                mapped_status = None
-                if norm_st is not None:
-                    mapped_status = norm_status_map.get(norm_st)
-                    if mapped_status is None:
-                        unmapped_statuses[status_raw] += 1
-                tracker.record("orders.status", status_raw_cell, mapped_status is not None)
+                if has_status_column:
+                    status_raw_cell = s_row[c_o_st] if c_o_st is not None else None
+                    status_raw = _strip_str(status_raw_cell)
+                    norm_st = normalize_label(status_raw) if status_raw is not None else None
+                    mapped_status = None
+                    if norm_st is not None:
+                        mapped_status = norm_status_map.get(norm_st)
+                        if mapped_status is None:
+                            unmapped_statuses[status_raw] += 1
+                    tracker.record("orders.status", status_raw_cell, mapped_status is not None)
+                else:
+                    status_raw = None
+                    mapped_status = "completed"
 
                 cid_raw = s_row[c_o_cid] if c_o_cid is not None else None
                 cid = _strip_str(cid_raw)
@@ -980,6 +1007,9 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
                 )
                 orow["customer_key"] = ckey
                 orow["is_walk_in"] = is_walk_in
+
+    if has_status_column and _fill_blank_status_as_completed(order_rows):
+        notes.append("status column is mostly blank (exceptions only): blank orders completed")
 
     orders_df = _records_to_df(order_rows, ORDERS_COLUMNS)
 

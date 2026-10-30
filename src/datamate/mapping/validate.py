@@ -128,6 +128,16 @@ def validate_mapping(
                 )
             )
 
+    orders_tm = mapping.tables.get("orders")
+    if orders_tm is not None and "status" not in orders_tm.columns:
+        issues.append(
+            Issue(
+                step="B_orders",
+                severity="warning",
+                message="no status column: all orders completed",
+            )
+        )
+
     # Check duplicate raw column within the same entity, allowing (order_date, order_ts) and (qty, unit)
     for ent, tm in mapping.tables.items():
         by_raw_col: dict[str, list[str]] = {}

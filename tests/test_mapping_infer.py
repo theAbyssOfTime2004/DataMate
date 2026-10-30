@@ -191,12 +191,10 @@ def test_infer_mapping_from_scripted_answers_and_step_b_enum(tmp_path: Path) -> 
     assert next(iter(line_props)) == "line_amount"
     assert step_b_line_call["required_keys"] == ["line_amount"]
     step_b_ord_call = next(c for c in fake.calls if c["schema_name"] == "step_b_orders")
-    assert list(step_b_ord_call["schema"]["properties"])[:3] == [
-        "order_id",
-        "order_date",
-        "status",
-    ]
-    assert step_b_ord_call["required_keys"] == ["order_id", "order_date", "status"]
+    assert list(step_b_ord_call["schema"]["properties"])[:2] == ["order_id", "order_date"]
+    assert "status" in step_b_ord_call["schema"]["properties"]
+    assert step_b_ord_call["required_keys"] == ["order_id", "order_date"]
+    assert "Map `status` only to a column that records the order state" in step_b_ord_call["prompt"]
     assert res.canonical is not None
     _issues_again, canon_again = validate_mapping(raw, m)
     assert canon_again is res.canonical
@@ -851,3 +849,256 @@ def test_persistent_wrong_order_subtotal_is_dropped(tmp_path: Path) -> None:
     order_calls = [c for c in fake.calls if c["schema_name"] == "step_b_orders"]
     assert len(order_calls) == 2
     assert "Previous answer:" in order_calls[1]["prompt"]
+
+
+def test_invoice_only_table_marked_as_orders_becomes_the_line_table() -> None:
+    from datamate.mapping.infer import _parse_step_a_roles
+
+    answer = {
+        "tables": [{"table": "danh_sach_hoa_don.csv", "entity": "orders"}],
+        "orders_source": "own_table",
+    }
+    chosen, orders_source, error = _parse_step_a_roles(answer, {"danh_sach_hoa_don.csv"})
+    assert error is None
+    assert chosen == {"order_lines": "danh_sach_hoa_don.csv"}
+    assert orders_source == "order_lines"
+
+    two = {
+        "tables": [
+            {"table": "don.csv", "entity": "orders"},
+            {"table": "khach.csv", "entity": "customers"},
+        ],
+        "orders_source": "own_table",
+    }
+    chosen, _source, error = _parse_step_a_roles(two, {"don.csv", "khach.csv"})
+    assert error is None
+    assert chosen["order_lines"] == "don.csv" and chosen["customers"] == "khach.csv"
+
+    missing = {"tables": [{"table": "khach.csv", "entity": "customers"}], "orders_source": "own_table"}
+    assert _parse_step_a_roles(missing, {"khach.csv"})[2] is not None
+
+
+def test_free_text_status_column_dropped_without_step_c(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text(
+        "# Shop\n\n## Quy ước\n- Dữ liệu có đến hết 15/08/2026.\n",
+        encoding="utf-8",
+    )
+    lines = ["Ngày,Ghi chú,Món,Tiền"]
+    for i in range(71):
+        lines.append(f"01/08/2026,ghi chú số {i},Cà phê,10.000đ")
+    (tmp_path / "ban.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    raw = read_business(tmp_path)
+    profile = profile_business(raw)
+    table_name = profile.tables[0].name
+    null_ord = {
+        "order_id": None,
+        "order_date": "Ngày",
+        "order_ts": None,
+        "status": "Ghi chú",
+        "customer_id": None,
+        "customer_name": None,
+        "payment_method": None,
+        "channel": None,
+        "employee_id": None,
+        "order_subtotal": None,
+        "order_discount": None,
+        "shipping_fee": None,
+        "order_payable": None,
+    }
+    null_line = {
+        "order_id": None,
+        "line_no": None,
+        "product_id": None,
+        "product_name": "Món",
+        "qty": None,
+        "unit": None,
+        "qty_base": None,
+        "unit_price": None,
+        "line_discount": None,
+        "line_amount": "Tiền",
+        "cost_per_unit": None,
+    }
+    fake = FakeClient(
+        {
+            "step_a_table_roles": [
+                {
+                    "tables": [{"table": table_name, "entity": "order_lines"}],
+                    "orders_source": "order_lines",
+                }
+            ],
+            "step_b_order_lines": [null_line],
+            "step_b_orders": [null_ord],
+            "step_d_customers_returns": [
+                {"walk_in_values": [], "return_rule": "status"}
+            ],
+        }
+    )
+    res = infer_mapping(raw, profile, fake)
+    assert res.mapping is not None
+    assert "status" not in res.mapping.tables["orders"].columns
+    assert res.mapping.status_map == {}
+    assert not any(c["schema_name"] == "step_c_status_map" for c in fake.calls)
+    warn_msgs = [iss.message for iss in res.issues if iss.severity == "warning"]
+    assert any("71 distinct" in msg for msg in warn_msgs)
+    assert any("no status column" in msg for msg in warn_msgs)
+
+
+def test_step_a_rejects_glossary_when_large_dated_sheet_exists(tmp_path: Path) -> None:
+    from datamate.io.profile import ColumnProfile, TableProfile
+    from datamate.mapping.infer import check_order_lines_sales_table
+
+    glossary = TableProfile(
+        name="tu_dien.xlsx!Sheet1",
+        kind="xlsx",
+        n_sources=1,
+        source_files=["tu_dien.xlsx"],
+        sheet_names=["Sheet1"],
+        header_rows=[1],
+        n_rows=59,
+        n_exact_duplicate_rows=0,
+        dropped_counts={},
+        dropped_previews={},
+        notes=[],
+        columns=[
+            ColumnProfile(
+                name="Ma",
+                group=None,
+                non_null=59,
+                null_ratio=0.0,
+                n_distinct=59,
+                kinds=[("id_like", 1.0)],
+            )
+        ],
+    )
+    sales = TableProfile(
+        name="SoBanHang.xlsx!BanHang",
+        kind="xlsx",
+        n_sources=1,
+        source_files=["SoBanHang.xlsx"],
+        sheet_names=["BanHang"],
+        header_rows=[1],
+        n_rows=10_000,
+        n_exact_duplicate_rows=0,
+        dropped_counts={},
+        dropped_previews={},
+        notes=[],
+        columns=[
+            ColumnProfile(
+                name="Ngay",
+                group=None,
+                non_null=10_000,
+                null_ratio=0.0,
+                n_distinct=400,
+                kinds=[("date_dmy", 0.95)],
+            )
+        ],
+    )
+    profiles = {glossary.name: glossary, sales.name: sales}
+    msg = check_order_lines_sales_table(
+        {"order_lines": glossary.name},
+        "order_lines",
+        profiles,
+    )
+    assert msg is not None
+    assert "59 rows and no date column" in msg
+    assert "10000 rows with dates" in msg
+    assert "glossary or lookup table is not the sales table" in msg
+
+    # End-to-end: first Step A picks glossary, repair picks sales.
+    (tmp_path / "README.md").write_text(
+        "# Shop\n\n## Quy ước\n- Dữ liệu có đến hết 15/08/2026.\n",
+        encoding="utf-8",
+    )
+    gloss_lines = ["Ma,Ten"] + [f"M{i},Ten {i}" for i in range(59)]
+    (tmp_path / "tu_dien.csv").write_text("\n".join(gloss_lines) + "\n", encoding="utf-8")
+    sale_lines = ["Ngay,Mon,Tien"] + [
+        f"01/08/2026,Mon {i},10.000đ" for i in range(600)
+    ]
+    (tmp_path / "ban_hang.csv").write_text("\n".join(sale_lines) + "\n", encoding="utf-8")
+    raw = read_business(tmp_path)
+    profile = profile_business(raw)
+    by_name = {t.name: t for t in profile.tables}
+    # Prefer real profiles; require 10x — pad glossary small vs sales large from files.
+    gloss_name = next(n for n in by_name if "tu_dien" in n)
+    sale_name = next(n for n in by_name if "ban_hang" in n)
+    assert by_name[sale_name].n_rows >= 10 * by_name[gloss_name].n_rows
+
+    null_ord = {
+        "order_id": None,
+        "order_date": "Ngay",
+        "order_ts": None,
+        "status": None,
+        "customer_id": None,
+        "customer_name": None,
+        "payment_method": None,
+        "channel": None,
+        "employee_id": None,
+        "order_subtotal": None,
+        "order_discount": None,
+        "shipping_fee": None,
+        "order_payable": None,
+    }
+    null_line = {
+        "order_id": None,
+        "line_no": None,
+        "product_id": None,
+        "product_name": "Mon",
+        "qty": None,
+        "unit": None,
+        "qty_base": None,
+        "unit_price": None,
+        "line_discount": None,
+        "line_amount": "Tien",
+        "cost_per_unit": None,
+    }
+    fake = FakeClient(
+        {
+            "step_a_table_roles": [
+                {
+                    "tables": [{"table": gloss_name, "entity": "order_lines"}],
+                    "orders_source": "order_lines",
+                },
+                {
+                    "tables": [{"table": sale_name, "entity": "order_lines"}],
+                    "orders_source": "order_lines",
+                },
+            ],
+            "step_b_order_lines": [null_line],
+            "step_b_orders": [null_ord],
+            "step_d_customers_returns": [
+                {"walk_in_values": [], "return_rule": "negative_qty"}
+            ],
+        }
+    )
+    res = infer_mapping(raw, profile, fake)
+    assert res.mapping is not None
+    assert res.mapping.tables["order_lines"].sources[0].file.startswith("ban_hang")
+    a_calls = [c for c in fake.calls if c["schema_name"] == "step_a_table_roles"]
+    assert len(a_calls) == 2
+    assert "glossary or lookup table is not the sales table" in a_calls[1]["prompt"]
+
+
+def test_multi_sheet_table_sharing_a_workbook_lists_its_sheets() -> None:
+    import pandas as pd
+
+    from datamate.io.raw import RawTable, SourceRef
+    from datamate.mapping.infer import _build_source_specs_from_raw_table
+
+    def table(name: str, sheets: list[str]) -> RawTable:
+        return RawTable(
+            name=name,
+            kind="xlsx",
+            sources=[SourceRef(file="SoBanHang.xlsx", sheet=s, header_row=1) for s in sheets],
+            columns=["a"],
+            df=pd.DataFrame({"a": []}),
+        )
+
+    sales = table("SoBanHang.xlsx!T#-#", ["T7-2025", "T8-2025"])
+    glossary = table("SoBanHang.xlsx!Ghi tắt", ["Ghi tắt"])
+    shared = _build_source_specs_from_raw_table(
+        sales, {sales.name: sales, glossary.name: glossary}
+    )
+    assert [spec.sheet for spec in shared] == ["T7-2025", "T8-2025"]
+    alone = _build_source_specs_from_raw_table(sales, {sales.name: sales})
+    assert [spec.sheet for spec in alone] == ["*"]

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from datamate.config import settings
-from datamate.io.profile import BusinessProfile, TableProfile, render_card
+from datamate.io.profile import BusinessProfile, ColumnProfile, TableProfile, render_card
 from datamate.io.raw import BusinessRaw, RawTable
 from datamate.llm.client import LLMError, LLMUnavailable
 from datamate.mapping.fields import FIELD_DOCS, REQUIRED_FIELDS
@@ -24,6 +24,12 @@ from datamate.mapping.model import (
 from datamate.mapping.validate import Issue, is_id_or_phone_like, validate_mapping
 from datamate.parse import parse_date, parse_qty
 
+_DATE_KINDS = frozenset(
+    {"date_dmy", "date_dm", "date_thg", "datetime_iso", "int_serial_range"}
+)
+_STATUS_DISTINCT_LIMIT = 30
+_NO_STATUS_NOTE = "no status column: all orders completed"
+
 if TYPE_CHECKING:
     from datamate.etl.build import CanonicalData
 
@@ -32,6 +38,13 @@ _STEP_MAX_TOKENS = 512
 _NO_ORDER_ID_HINT = (
     "- Set `order_id` to null if the table records one sale per row "
     "without an order/invoice code.\n"
+)
+# Invoice-only files (one row per order, no item lines) list both the merchandise amount and
+# what the customer pays; rulebook revenue is the merchandise amount.
+_WHOLE_ORDER_ROW_HINT = (
+    "- If each row is a whole order with no item lines, `line_amount` is the order's merchandise "
+    "amount (tiền hàng / giá trị hàng: before order-level discount, without shipping), NOT the "
+    "amount the customer pays (tổng tiền khách trả, after discount and shipping).\n"
 )
 _ALL_ENTITIES: tuple[Entity, ...] = (
     "orders",
@@ -132,20 +145,32 @@ def _readme_conventions_only(readme_text: str | None) -> str:
     return "\n\n".join(kept).strip()
 
 
-def _build_source_specs_from_raw_table(rt: RawTable) -> list[SourceSpec]:
+def _build_source_specs_from_raw_table(
+    rt: RawTable, raw_by_name: dict[str, RawTable] | None = None
+) -> list[SourceSpec]:
     by_file: dict[str, list[tuple[str | None, int]]] = {}
     for sref in rt.sources:
         by_file.setdefault(sref.file, []).append((sref.sheet, sref.header_row))
+    # Sheet "*" means every sheet of the file, so it is only safe when no other table
+    # (a glossary or a debt sheet in the same workbook) lives in that file.
+    shared_files = {
+        sref.file
+        for other in (raw_by_name or {}).values()
+        if other.name != rt.name
+        for sref in other.sources
+    }
 
     specs: list[SourceSpec] = []
     for fname, items in by_file.items():
-        first_sheet, first_hrow = items[0]
+        _first_sheet, first_hrow = items[0]
         if rt.kind == "csv":
             specs.append(SourceSpec(file=fname, sheet=None, header_row=first_hrow))
-        elif len(items) > 1:
+        elif len(items) > 1 and fname not in shared_files:
             specs.append(SourceSpec(file=fname, sheet="*", header_row=first_hrow))
         else:
-            specs.append(SourceSpec(file=fname, sheet=first_sheet, header_row=first_hrow))
+            specs.extend(
+                SourceSpec(file=fname, sheet=sheet, header_row=hrow) for sheet, hrow in items
+            )
     return specs
 
 
@@ -330,6 +355,7 @@ def _build_step_b_variants(
             "NOT the unit price (`unit_price`) and NOT the pre-discount amount.\n"
             "- Only map `qty_base` if the table has a separate pre-converted base-unit quantity column.\n"
             f"{_NO_ORDER_ID_HINT}"
+            f"{_WHOLE_ORDER_ROW_HINT if orders_source == 'order_lines' else ''}"
         )
     elif entity == "orders":
         derived_note = ""
@@ -347,6 +373,9 @@ def _build_step_b_variants(
             "- `order_date` is the date the order was placed. If a table has both a date column and a "
             "timestamp/time column, map `order_date` to the date column (or timestamp if it is the only date) "
             "and `order_ts` to the full timestamp column.\n"
+            "- Map `status` only to a column that records the order state "
+            "(done / cancelled / returned / delivering). If there is none, leave it null; do not "
+            "use a free-text note or a work-description column.\n"
             "- `order_subtotal` is the merchandise total BEFORE order-level discount and shipping fee.\n"
             f"{order_id_hint}"
             f"{derived_note}"
@@ -410,6 +439,65 @@ def _collect_distinct_counts(rt: RawTable, col_name: str, limit: int = 50) -> li
     counts = Counter(vals)
     sorted_items = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
     return sorted_items[:limit]
+
+
+def _n_distinct_nonempty(rt: RawTable, col_name: str) -> int:
+    if col_name not in rt.df.columns:
+        return 0
+    return len(
+        {
+            v.strip()
+            for v in rt.df[col_name].tolist()
+            if isinstance(v, str) and v.strip()
+        }
+    )
+
+
+def _column_mostly_date(col: ColumnProfile) -> bool:
+    if not col.kinds:
+        return False
+    kind, share = col.kinds[0]
+    return kind in _DATE_KINDS and share >= 0.5
+
+
+def _table_has_date_column(tp: TableProfile) -> bool:
+    return any(_column_mostly_date(col) for col in tp.columns)
+
+
+def check_order_lines_sales_table(
+    chosen: dict[Entity, str],
+    orders_source: str,
+    profiles: dict[str, TableProfile],
+) -> str | None:
+    """Reject a tiny undated 'sales' pick when a much larger dated table exists."""
+    ol_name = chosen.get("order_lines")
+    if ol_name is None or ol_name not in profiles:
+        return None
+    ol_tp = profiles[ol_name]
+    orders_name = chosen.get("orders") if orders_source == "own_table" else None
+    date_ok = _table_has_date_column(ol_tp)
+    if not date_ok and orders_name is not None and orders_name in profiles:
+        date_ok = _table_has_date_column(profiles[orders_name])
+    if date_ok:
+        return None
+
+    bigger: TableProfile | None = None
+    for name, tp in profiles.items():
+        if name == ol_name or name == orders_name:
+            continue
+        if (
+            tp.n_rows >= 10 * max(ol_tp.n_rows, 1)
+            and _table_has_date_column(tp)
+            and (bigger is None or tp.n_rows > bigger.n_rows)
+        ):
+            bigger = tp
+    if bigger is None:
+        return None
+    return (
+        f"{ol_name} has {ol_tp.n_rows} rows and no date column; "
+        f"{bigger.name} has {bigger.n_rows} rows with dates. "
+        "A glossary or lookup table is not the sales table."
+    )
 
 
 def _collect_walk_in_candidates(
@@ -547,7 +635,7 @@ def _assemble_mapping(
             if cols_map:
                 rt = raw_by_name[chosen_tables[ent_typed]]
                 tables_dict[ent_typed] = TableMapping(
-                    sources=_build_source_specs_from_raw_table(rt),
+                    sources=_build_source_specs_from_raw_table(rt, raw_by_name),
                     columns=cols_map,
                 )
 
@@ -566,7 +654,7 @@ def _assemble_mapping(
         )
 
     tables_dict["order_lines"] = TableMapping(
-        sources=_build_source_specs_from_raw_table(ol_rt),
+        sources=_build_source_specs_from_raw_table(ol_rt, raw_by_name),
         join=ol_joins,
         columns=ol_cols,
     )
@@ -584,12 +672,15 @@ def _assemble_mapping(
         ord_table_name = chosen_tables["orders"]
         ord_rt = raw_by_name[ord_table_name]
         tables_dict["orders"] = TableMapping(
-            sources=_build_source_specs_from_raw_table(ord_rt),
+            sources=_build_source_specs_from_raw_table(ord_rt, raw_by_name),
             columns=ord_cols,
         )
 
     customer_identity = "by_code" if "customer_id" in ord_cols else "by_name"
     data_end_date = extract_data_end_date(profile.readme_text)
+    notes: list[str] = []
+    if "status" not in ord_cols:
+        notes.append(_NO_STATUS_NOTE)
 
     return Mapping(
         business_id=profile.business_name,
@@ -599,6 +690,7 @@ def _assemble_mapping(
         return_rule=return_rule,
         status_map=status_map,
         tables=tables_dict,
+        notes=notes,
     )
 
 
@@ -619,6 +711,11 @@ def _parse_step_a_roles(
         by_entity.setdefault(ent, []).append(tname)
 
     ol_list = by_entity.get("order_lines", [])
+    if not ol_list and len(by_entity.get("orders", [])) == 1:
+        # An invoice-only file (one row per order, no line items) is its own line table:
+        # each order is read as one line, the same as orders_source "order_lines".
+        ol_list = by_entity.pop("orders")
+        orders_source = "order_lines"
     if len(ol_list) != 1:
         return (
             {},
@@ -698,9 +795,14 @@ def infer_mapping(
                 last_ans_a, set(table_names)
             )
             if role_err is None:
-                chosen_tables = new_chosen
-                orders_source = new_orders_source
-                return True
+                sales_err = check_order_lines_sales_table(
+                    new_chosen, new_orders_source, prof_by_name
+                )
+                if sales_err is None:
+                    chosen_tables = new_chosen
+                    orders_source = new_orders_source
+                    return True
+                role_err = sales_err
             a_repair_msg = (
                 f"Previous answer: {json.dumps(last_ans_a, ensure_ascii=False)}\n"
                 f"Problem: {role_err}. Fix it."
@@ -772,6 +874,23 @@ def infer_mapping(
 
     status_map: dict[str, OrderStatus] = {}
     last_ans_c: dict[str, Any] = {}
+    early_warnings: list[Issue] = []
+
+    def _drop_status_as_free_text(n_distinct: int) -> None:
+        nonlocal status_map
+        ord_cols = entity_columns.setdefault("orders", {})
+        ord_cols.pop("status", None)
+        status_map = {}
+        early_warnings.append(
+            Issue(
+                step="C",
+                severity="warning",
+                message=(
+                    f"status column looks like free text ({n_distinct} distinct values > "
+                    f"{_STATUS_DISTINCT_LIMIT}); dropped status mapping"
+                ),
+            )
+        )
 
     def _run_step_c(repair_suffix: str | None = None) -> bool:
         nonlocal status_map, last_ans_c
@@ -783,6 +902,10 @@ def infer_mapping(
         st_col = entity_columns.get("orders", {}).get("status")
         if not st_col:
             status_map = {}
+            return True
+        n_distinct = _n_distinct_nonempty(ord_rt, st_col)
+        if n_distinct > _STATUS_DISTINCT_LIMIT:
+            _drop_status_as_free_text(n_distinct)
             return True
         st_counts = _collect_distinct_counts(ord_rt, st_col, limit=50)
         if not st_counts:
@@ -888,8 +1011,9 @@ def infer_mapping(
     )
 
     issues, canon = validate_mapping(raw, mapping)
-    dropped_notes: list[Issue] = []
+    dropped_notes: list[Issue] = list(early_warnings)
     retried_drops: set[str] = set()
+    issues = [*dropped_notes, *issues]
 
     # Repair loop: at most 2 repair rounds.
     # Optional-field consistency failures are re-asked once, then that field is dropped.

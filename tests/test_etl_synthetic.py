@@ -10,7 +10,7 @@ import pytest
 
 from datamate.etl import MappingError, build_canonical, write_duckdb
 from datamate.io.raw import read_business
-from datamate.mapping import Mapping
+from datamate.mapping import Mapping, validate_mapping
 
 
 def test_flat_sheet_ffill_dedupe_return_date_and_year_hint(tmp_path: Path) -> None:
@@ -356,6 +356,52 @@ def test_write_duckdb_wide_decimal_qty(tmp_path: Path) -> None:
     assert got == [Decimal("1.0000"), Decimal("10.0000"), Decimal("1000.0000")]
 
 
+def test_ledger_without_status_defaults_all_orders_completed(tmp_path: Path) -> None:
+    (tmp_path / "ledger.csv").write_text(
+        "Ngày,Khách,Món,SL,Tiền\n"
+        "01/08/2026,An,Cà phê,1,10000\n"
+        "02/08/2026,Bình,Trà,-1,5000\n",
+        encoding="utf-8",
+    )
+    mapping = Mapping.model_validate(
+        {
+            "customer_identity": "by_name",
+            "return_rule": "negative_qty",
+            "status_map": {},
+            "tables": {
+                "orders": {
+                    "derived_from": "order_lines",
+                    "columns": {
+                        "order_date": "Ngày",
+                        "customer_name": "Khách",
+                    },
+                },
+                "order_lines": {
+                    "sources": [{"file": "ledger.csv", "sheet": None, "header_row": 1}],
+                    "columns": {
+                        "product_name": "Món",
+                        "qty": "SL",
+                        "line_amount": "Tiền",
+                    },
+                },
+            },
+        }
+    )
+    canon = build_canonical(read_business(tmp_path), mapping)
+    assert "no status column: all orders completed" in canon.report.notes
+    orders = {row["order_id"]: row for row in canon.orders.to_dict("records")}
+    assert all(row["status_raw"] is None for row in orders.values())
+    completed = [row for row in orders.values() if row["status"] == "completed"]
+    returned = [row for row in orders.values() if row["status"] == "returned"]
+    assert len(completed) == 1
+    assert len(returned) == 1  # negative qty overrides default completed
+    issues, _canon2 = validate_mapping(read_business(tmp_path), mapping)
+    assert any(
+        iss.severity == "warning" and "no status column" in iss.message for iss in issues
+    )
+    assert not any(iss.severity == "error" and "status" in iss.message for iss in issues)
+
+
 def test_no_order_id_is_one_order_per_row_and_skips_dedupe(tmp_path: Path) -> None:
     (tmp_path / "ledger.csv").write_text(
         "Ngày,Trạng thái,Khách,Món,SL,Tiền\n"
@@ -395,3 +441,33 @@ def test_no_order_id_is_one_order_per_row_and_skips_dedupe(tmp_path: Path) -> No
     assert len(canon.orders) == 2
     ids = set(canon.orders["order_id"].tolist())
     assert ids == {"ledger.csv||2", "ledger.csv||3"}
+
+
+def test_mostly_blank_status_column_only_marks_exceptions(tmp_path: Path) -> None:
+    (tmp_path / "ledger.csv").write_text(
+        "Ngày,Ghi chú,Món,Tiền\n"
+        "01/08/2026,,Cà phê,10000\n"
+        "02/08/2026,,Trà,5000\n"
+        "03/08/2026,khách trả lại,Bánh,7000\n",
+        encoding="utf-8",
+    )
+    mapping = Mapping.model_validate(
+        {
+            "customer_identity": "by_name",
+            "return_rule": "status",
+            "status_map": {"khách trả lại": "returned"},
+            "tables": {
+                "orders": {
+                    "derived_from": "order_lines",
+                    "columns": {"order_date": "Ngày", "status": "Ghi chú"},
+                },
+                "order_lines": {
+                    "sources": [{"file": "ledger.csv", "sheet": None, "header_row": 1}],
+                    "columns": {"product_name": "Món", "line_amount": "Tiền"},
+                },
+            },
+        }
+    )
+    canon = build_canonical(read_business(tmp_path), mapping)
+    assert sorted(canon.orders["status"]) == ["completed", "completed", "returned"]
+    assert any("mostly blank" in note for note in canon.report.notes)
