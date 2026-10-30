@@ -1,4 +1,4 @@
-.env
+﻿.env
 .venv/
 __pycache__/
 *.pyc
@@ -15,6 +15,6 @@ runs/
 /public_test/
 /private_test/
 
-# Cursor: keep project rules, ignore everything else (may contain tokens)
-/.cursor/*
-!/.cursor/rules/
+# Local IDE / agent tooling (not published)
+.cursor/
+docs/cursor/
