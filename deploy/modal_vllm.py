@@ -8,12 +8,24 @@ One-time setup (run these yourself; keys never go into chat or git):
     .venv\\Scripts\\modal setup
     .venv\\Scripts\\modal secret create datamate-vllm VLLM_API_KEY=<a long random string>
 
-Deploy / stop:
+Deploy 4B (defaults):
     .venv\\Scripts\\modal deploy deploy/modal_vllm.py
     .venv\\Scripts\\modal app stop datamate-vllm
 
+Deploy 14B alongside 4B (different app name, so they do not overwrite each other).
+PowerShell:
+    $env:DATAMATE_MODEL="Qwen/Qwen3-14B-FP8"
+    $env:DATAMATE_SERVED_NAME="qwen3-14b"
+    $env:DATAMATE_APP="datamate-vllm-14b"
+    .venv\\Scripts\\modal deploy deploy/modal_vllm.py
+
+Then point .env at the 14B URL with LLM_MODEL=qwen3-14b and LLM_DISABLE_THINKING=true.
+
 GPU defaults to L40S (FP8 native, 48 GB); override with DATAMATE_GPU=L4 or H100 at deploy.
 The container scales to zero after SCALEDOWN_S idle seconds, so an idle endpoint costs nothing.
+
+Env overrides (defaults keep the original 4B deploy):
+    DATAMATE_MODEL, DATAMATE_SERVED_NAME, DATAMATE_APP, DATAMATE_MAX_LEN, DATAMATE_GPU
 """
 
 from __future__ import annotations
@@ -23,8 +35,10 @@ import subprocess
 
 import modal
 
-MODEL = "Qwen/Qwen3-4B-Instruct-2507-FP8"
-SERVED_NAME = "qwen3-4b"  # must match LLM_MODEL; it is part of the LLM cache key
+MODEL = os.environ.get("DATAMATE_MODEL", "Qwen/Qwen3-4B-Instruct-2507-FP8")
+SERVED_NAME = os.environ.get("DATAMATE_SERVED_NAME", "qwen3-4b")  # must match LLM_MODEL
+APP_NAME = os.environ.get("DATAMATE_APP", "datamate-vllm")
+MAX_MODEL_LEN = os.environ.get("DATAMATE_MAX_LEN", "8192")
 VLLM_VERSION = "0.32.0"  # same version as the local docker compose (vllm-openai:v0.32.0)
 GPU = os.environ.get("DATAMATE_GPU", "L40S")
 PORT = 8000
@@ -42,7 +56,7 @@ image = (
 hf_cache = modal.Volume.from_name("datamate-hf-cache", create_if_missing=True)
 vllm_cache = modal.Volume.from_name("datamate-vllm-cache", create_if_missing=True)
 
-app = modal.App("datamate-vllm")
+app = modal.App(APP_NAME)
 
 
 @app.function(
@@ -67,7 +81,7 @@ def serve() -> None:
         "--served-model-name",
         SERVED_NAME,
         "--max-model-len",
-        "8192",
+        str(MAX_MODEL_LEN),
         "--host",
         "0.0.0.0",
         "--port",

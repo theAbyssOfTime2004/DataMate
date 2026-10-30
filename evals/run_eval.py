@@ -27,6 +27,7 @@ from datamate.scoring.answer import Answer, to_submission_line
 from datamate.scoring.scorer import score_file
 from datamate.systems.abstain import AlwaysAbstain
 from datamate.systems.base import System
+from datamate.systems.direct import DirectSystem
 from datamate.systems.pipeline import LLM_UNAVAILABLE
 from evals.subsets import select_questions, tag_topics
 from evals.systems_gold import make_pipeline_gold, make_pipeline_llm
@@ -38,6 +39,7 @@ SYSTEM_REGISTRY: dict[str, Any] = {
     "abstain": AlwaysAbstain,
     "pipeline_gold": make_pipeline_gold,
     "pipeline_llm": make_pipeline_llm,
+    "direct": DirectSystem,
 }
 
 
