@@ -20,8 +20,12 @@ class Settings(BaseSettings):
     llm_max_output_tokens: int = 1024
     llm_prompt_budget_tokens: int = 6000
     llm_cache_enabled: bool = True
+    llm_disable_thinking: bool = False
     seed: int = 20261116
     parse_votes: int = 2
+    direct_timeout_s: float = 30.0
+    direct_repairs: int = 2
+    direct_prompt_budget_tokens: int = 6600
 
     @field_validator("cache_dir", "runs_dir", mode="after")
     @classmethod

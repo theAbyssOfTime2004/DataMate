@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import tempfile
 import time
 from dataclasses import dataclass
@@ -13,6 +14,8 @@ from typing import Any
 import httpx
 
 from datamate.config import settings
+
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
 class LLMError(RuntimeError):
@@ -54,6 +57,7 @@ class LLMClient:
         cache_dir: Path | None = None,
         cache_enabled: bool | None = None,
         max_output_tokens: int | None = None,
+        disable_thinking: bool | None = None,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.base_url = (base_url if base_url is not None else settings.llm_base_url).rstrip("/")
@@ -67,6 +71,11 @@ class LLMClient:
         )
         self.max_output_tokens = (
             max_output_tokens if max_output_tokens is not None else settings.llm_max_output_tokens
+        )
+        self.disable_thinking = (
+            disable_thinking
+            if disable_thinking is not None
+            else settings.llm_disable_thinking
         )
         self.usage_log: list[UsageEntry] = []
         self._token_count_cache: dict[str, int] = {}
@@ -89,7 +98,7 @@ class LLMClient:
         schema: dict[str, Any],
         max_tokens: int,
     ) -> tuple[str, dict[str, Any]]:
-        canonical_req = {
+        canonical_req: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "schema": schema,
@@ -97,6 +106,9 @@ class LLMClient:
             "seed": self.seed,
             "max_tokens": max_tokens,
         }
+        # Only when set: keeps every existing 4B cache entry keyed without this field.
+        if self.disable_thinking:
+            canonical_req["chat_template_kwargs"] = {"enable_thinking": False}
         dumped = json.dumps(canonical_req, sort_keys=True, ensure_ascii=False)
         key = hashlib.sha256(dumped.encode("utf-8")).hexdigest()
         return key, canonical_req
@@ -205,6 +217,8 @@ class LLMClient:
                 },
             },
         }
+        if self.disable_thinking:
+            body["chat_template_kwargs"] = {"enable_thinking": False}
 
         resp, retried = self._post_with_timeout_retry(
             url,
@@ -238,6 +252,7 @@ class LLMClient:
         if not isinstance(content, str):
             raise LLMError(f"Completion content is not a string: {content!r}")
 
+        content = _strip_think_blocks(content)
         finish_reason = data["choices"][0].get("finish_reason")
         parsed_obj = _parse_llm_json(
             content,
@@ -329,6 +344,13 @@ class LLMClient:
 
         self._token_count_cache[text] = count
         return count
+
+
+def _strip_think_blocks(content: str) -> str:
+    """Remove Qwen3 hybrid-thinking ``<think>...</think>`` prefixes before JSON parse."""
+    if "<think>" not in content.casefold():
+        return content
+    return _THINK_BLOCK_RE.sub("", content).lstrip()
 
 
 def _parse_llm_json(content: str, finish_reason: str | None) -> Any:

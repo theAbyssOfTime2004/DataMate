@@ -376,6 +376,162 @@ def test_chat_json_retries_httpx_timeout_once(tmp_path: Path) -> None:
     broken.close()
 
 
+# Hard-coded BEFORE llm_disable_thinking landed — must stay byte-identical for 4B cache hits.
+_BASELINE_CACHE_KEY = "c4be0e8d6abeeac48a6f2d3f9e8c1a140eba5c8b244ff22f13243cf1b6727df8"
+
+
+def test_cache_key_stable_without_disable_thinking(tmp_path: Path) -> None:
+    client = LLMClient(
+        base_url="http://mock-server:8000/v1",
+        model="qwen3-4b",
+        seed=20261116,
+        cache_dir=tmp_path,
+        cache_enabled=False,
+        max_output_tokens=256,
+        disable_thinking=False,
+        transport=httpx.MockTransport(lambda r: httpx.Response(500)),
+    )
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "integer"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+    messages = [{"role": "user", "content": "Return 42"}]
+    key, canonical = client._compute_cache_key(messages, schema, 256)
+    assert key == _BASELINE_CACHE_KEY
+    assert "chat_template_kwargs" not in canonical
+    client.close()
+
+
+def test_disable_thinking_changes_body_and_cache_key(tmp_path: Path) -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"answer": 1}'}}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+            },
+        )
+
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "integer"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+    messages = [{"role": "user", "content": "Return 42"}]
+
+    off = LLMClient(
+        base_url="http://mock-server:8000/v1",
+        model="qwen3-4b",
+        seed=20261116,
+        cache_dir=tmp_path / "off",
+        cache_enabled=False,
+        max_output_tokens=256,
+        disable_thinking=False,
+        transport=httpx.MockTransport(handler),
+    )
+    on = LLMClient(
+        base_url="http://mock-server:8000/v1",
+        model="qwen3-4b",
+        seed=20261116,
+        cache_dir=tmp_path / "on",
+        cache_enabled=False,
+        max_output_tokens=256,
+        disable_thinking=True,
+        transport=httpx.MockTransport(handler),
+    )
+    key_off, _ = off._compute_cache_key(messages, schema, 256)
+    key_on, canonical_on = on._compute_cache_key(messages, schema, 256)
+    assert key_off == _BASELINE_CACHE_KEY
+    assert key_on != key_off
+    assert canonical_on["chat_template_kwargs"] == {"enable_thinking": False}
+
+    assert on.chat_json(messages, schema=schema, schema_name="think_off") == {"answer": 1}
+    assert bodies[-1]["chat_template_kwargs"] == {"enable_thinking": False}
+    off.close()
+    on.close()
+
+
+def test_disable_thinking_on_guided_json_fallback(tmp_path: Path) -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        bodies.append(body)
+        if "response_format" in body:
+            return httpx.Response(400, text='{"error": "response_format"}')
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"status": "ok"}'}}],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 2},
+            },
+        )
+
+    client = LLMClient(
+        base_url="http://mock-server:8000/v1",
+        cache_dir=tmp_path,
+        cache_enabled=False,
+        disable_thinking=True,
+        transport=httpx.MockTransport(handler),
+    )
+    schema = {
+        "type": "object",
+        "properties": {"status": {"type": "string"}},
+        "required": ["status"],
+    }
+    assert client.chat_json(
+        [{"role": "user", "content": "ping"}],
+        schema=schema,
+        schema_name="ping",
+    ) == {"status": "ok"}
+    assert len(bodies) == 2
+    assert bodies[0]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert bodies[1]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "guided_json" in bodies[1]
+    client.close()
+
+
+def test_strips_think_block_before_json_parse(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": '<think>x</think>{"answer": 7}',
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 6},
+            },
+        )
+
+    client = LLMClient(
+        base_url="http://mock-server:8000/v1",
+        cache_dir=tmp_path,
+        cache_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "integer"}},
+        "required": ["answer"],
+    }
+    assert client.chat_json(
+        [{"role": "user", "content": "n"}],
+        schema=schema,
+        schema_name="think",
+    ) == {"answer": 7}
+    client.close()
+
+
 def test_live_vllm_smoke(tmp_path: Path) -> None:
     models_url = f"{settings.llm_base_url.rstrip('/')}/models"
     try:
