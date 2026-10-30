@@ -1102,3 +1102,13 @@ def test_multi_sheet_table_sharing_a_workbook_lists_its_sheets() -> None:
     assert [spec.sheet for spec in shared] == ["T7-2025", "T8-2025"]
     alone = _build_source_specs_from_raw_table(sales, {sales.name: sales})
     assert [spec.sheet for spec in alone] == ["*"]
+
+
+def test_step_b_does_not_offer_later_fields() -> None:
+    from datamate.mapping.infer import _step_b_field_docs, _step_b_schema
+
+    assert "amount_paid" not in _step_b_field_docs("orders")
+    assert "amount_due" not in _step_b_field_docs("orders")
+    assert "phone" not in _step_b_field_docs("customers")
+    schema_text = str(_step_b_schema("orders", ["Khách trả"], "own_table"))
+    assert "amount_paid" not in schema_text

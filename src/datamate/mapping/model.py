@@ -11,8 +11,29 @@ from typing import Any, ClassVar, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-Entity = Literal["orders", "order_lines", "products", "unit_conversions", "customers"]
+Entity = Literal[
+    "orders",
+    "order_lines",
+    "products",
+    "unit_conversions",
+    "customers",
+    "payments",
+    "debts",
+    "purchases",
+    "purchase_lines",
+    "suppliers",
+    "stock_snapshot",
+    "stock_moves",
+    "lots",
+    "sale_lots",
+    "price_history",
+    "expenses",
+    "employees",
+    "deliveries",
+    "drug_info",
+]
 OrderStatus = Literal["completed", "cancelled", "returned", "shipping"]
+PurchaseStatus = Literal["valid", "cancelled"]
 CustomerIdentity = Literal["by_code", "by_name"]
 ReturnRule = Literal["status", "negative_qty", "return_table"]
 
@@ -31,6 +52,8 @@ CANONICAL_FIELDS: dict[Entity, set[str]] = {
         "order_discount",
         "shipping_fee",
         "order_payable",
+        "amount_paid",
+        "amount_due",
     },
     "order_lines": {
         "order_id",
@@ -63,6 +86,131 @@ CANONICAL_FIELDS: dict[Entity, set[str]] = {
         "customer_id",
         "customer_name",
         "segment",
+        "phone",
+    },
+    "payments": {
+        "payment_id",
+        "order_id",
+        "customer_id",
+        "customer_name",
+        "pay_date",
+        "pay_ts",
+        "amount",
+        "method",
+        "kind_raw",
+        "note",
+    },
+    "debts": {
+        "order_id",
+        "customer_id",
+        "customer_name",
+        "order_date",
+        "due_date",
+        "amount_total",
+        "amount_paid",
+        "amount_remaining",
+        "as_of_date",
+    },
+    "purchases": {
+        "receipt_id",
+        "receipt_date",
+        "supplier_id",
+        "supplier_name",
+        "status_raw",
+        "total_amount",
+    },
+    "purchase_lines": {
+        "receipt_id",
+        "line_no",
+        "receipt_date",
+        "supplier_name",
+        "product_id",
+        "product_name",
+        "qty",
+        "unit",
+        "qty_base",
+        "unit_cost",
+        "line_amount",
+        "lot_id",
+        "expiry_date",
+    },
+    "suppliers": {
+        "supplier_id",
+        "supplier_name",
+    },
+    "stock_snapshot": {
+        "product_id",
+        "product_name",
+        "qty_on_hand",
+        "unit",
+        "as_of_date",
+        "unit_cost",
+    },
+    "stock_moves": {
+        "product_id",
+        "product_name",
+        "move_date",
+        "move_ts",
+        "qty_in",
+        "qty_out",
+        "balance",
+        "unit",
+        "ref_id",
+        "kind_raw",
+    },
+    "lots": {
+        "lot_id",
+        "product_id",
+        "product_name",
+        "receipt_id",
+        "received_date",
+        "expiry_date",
+        "qty_received",
+        "unit",
+        "unit_cost",
+    },
+    "sale_lots": {
+        "order_id",
+        "line_no",
+        "product_id",
+        "product_name",
+        "lot_id",
+        "qty",
+        "unit",
+    },
+    "price_history": {
+        "product_id",
+        "product_name",
+        "effective_date",
+        "price",
+        "unit",
+    },
+    "expenses": {
+        "expense_date",
+        "amount",
+        "category",
+        "note",
+    },
+    "employees": {
+        "employee_id",
+        "employee_name",
+        "alias",
+        "start_date",
+        "commission_pct",
+    },
+    "deliveries": {
+        "order_id",
+        "delivery_date",
+        "batch_no",
+        "qty",
+        "amount",
+        "status_raw",
+    },
+    "drug_info": {
+        "product_id",
+        "product_name",
+        "active_ingredient",
+        "is_prescription",
     },
 }
 
@@ -187,6 +335,7 @@ class Mapping(BaseModel):
     walk_in_values: list[str] = Field(default_factory=list)
     return_rule: ReturnRule
     status_map: dict[str, OrderStatus]
+    purchase_status_map: dict[str, PurchaseStatus] = Field(default_factory=dict)
     tables: dict[Entity, TableMapping]
     notes: list[str] = Field(default_factory=list)
 
@@ -200,6 +349,9 @@ class Mapping(BaseModel):
             tm.validate_for_entity(entity)
         self.walk_in_values = [_nfc_str(v) for v in self.walk_in_values]
         self.status_map = {_nfc_str(k): v for k, v in self.status_map.items()}
+        self.purchase_status_map = {
+            _nfc_str(k): v for k, v in self.purchase_status_map.items()
+        }
         return self
 
 
@@ -214,5 +366,8 @@ def load_mapping_yaml(path: Path | str) -> Mapping:
 
 def mapping_fingerprint(mapping: Mapping) -> str:
     payload = mapping.model_dump(mode="json", exclude={"business_id", "notes"})
+    # Empty purchase_status_map must not change keys of pre-E1b order-only mappings.
+    if not payload.get("purchase_status_map"):
+        payload.pop("purchase_status_map", None)
     canonical_json = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()

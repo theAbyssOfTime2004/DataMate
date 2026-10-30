@@ -1,0 +1,3 @@
+order_id,order_date,order_ts,status,status_raw,has_return,customer_key,customer_id,customer_name,is_walk_in,payment_method,channel,employee_id,order_subtotal,order_discount,shipping_fee,order_payable
+ORD001,2025-03-15,,completed,Xong,False,nguyễn văn a,,Nguyễn Văn A,False,,,,,,,
+ORD002,2025-03-16,,completed,xong,False,,,Khách lẻ,True,,,,,,,

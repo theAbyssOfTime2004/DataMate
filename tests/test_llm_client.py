@@ -386,6 +386,41 @@ def test_chat_json_retries_httpx_timeout_once(tmp_path: Path) -> None:
 _BASELINE_CACHE_KEY = "c4be0e8d6abeeac48a6f2d3f9e8c1a140eba5c8b244ff22f13243cf1b6727df8"
 
 
+def test_chat_json_retries_once_when_server_drops_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("datamate.llm.client._BUSY_RETRY_DELAY_S", 0.0)
+    statuses = [408, 200]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        status = statuses.pop(0)
+        if status != 200:
+            return httpx.Response(status, text="Missing request")
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"answer": 7}'}}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+            },
+        )
+
+    client = LLMClient(
+        base_url="http://mock-server:8000/v1",
+        model="qwen3-4b",
+        api_key="k",
+        cache_dir=tmp_path,
+        cache_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "integer"}},
+        "required": ["answer"],
+    }
+    assert client.chat_json([{"role": "user", "content": "x"}], schema, "t") == {"answer": 7}
+    assert statuses == []
+
+
 def test_cache_key_stable_without_disable_thinking(tmp_path: Path) -> None:
     client = LLMClient(
         base_url="http://mock-server:8000/v1",

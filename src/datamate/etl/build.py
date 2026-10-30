@@ -72,6 +72,20 @@ class CanonicalData:
     unit_conversions: pd.DataFrame
     customers: pd.DataFrame
     report: EtlReport
+    payments: pd.DataFrame = field(default_factory=pd.DataFrame)
+    debts: pd.DataFrame = field(default_factory=pd.DataFrame)
+    purchases: pd.DataFrame = field(default_factory=pd.DataFrame)
+    purchase_lines: pd.DataFrame = field(default_factory=pd.DataFrame)
+    suppliers: pd.DataFrame = field(default_factory=pd.DataFrame)
+    stock_snapshot: pd.DataFrame = field(default_factory=pd.DataFrame)
+    stock_moves: pd.DataFrame = field(default_factory=pd.DataFrame)
+    lots: pd.DataFrame = field(default_factory=pd.DataFrame)
+    sale_lots: pd.DataFrame = field(default_factory=pd.DataFrame)
+    price_history: pd.DataFrame = field(default_factory=pd.DataFrame)
+    expenses: pd.DataFrame = field(default_factory=pd.DataFrame)
+    employees: pd.DataFrame = field(default_factory=pd.DataFrame)
+    deliveries: pd.DataFrame = field(default_factory=pd.DataFrame)
+    drug_info: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 @dataclass
@@ -289,12 +303,14 @@ def _build_customers(
     c_cid = cols.get("customer_id")
     c_cname = cols.get("customer_name")
     c_seg = cols.get("segment")
+    c_phone = cols.get("phone")
 
     rows: list[dict[str, Any]] = []
     for row in df.to_dict("records"):
         cid_raw = row[c_cid] if c_cid is not None else None
         cname_raw = row[c_cname] if c_cname is not None else None
         seg_raw = row[c_seg] if c_seg is not None else None
+        phone_raw = row[c_phone] if c_phone is not None else None
 
         cid = _strip_str(cid_raw)
         tracker.record("customers.customer_id", cid_raw, cid is not None)
@@ -302,6 +318,8 @@ def _build_customers(
         tracker.record("customers.customer_name", cname_raw, cname is not None)
         seg = _strip_str(seg_raw)
         tracker.record("customers.segment", seg_raw, seg is not None)
+        phone = _strip_str(phone_raw)
+        tracker.record("customers.phone", phone_raw, phone is not None)
 
         ckey = (
             cid
@@ -314,6 +332,7 @@ def _build_customers(
                 "customer_id": cid,
                 "customer_name": cname,
                 "segment": seg,
+                "phone": phone,
             }
         )
     return _records_to_df(rows, CUSTOMERS_COLUMNS)
@@ -815,7 +834,14 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
                 val_ts = parse_timestamp(raw_val, default_year=_cached_year_hint(s_name, f_name))
                 tracker.record("orders.order_ts", raw_val, val_ts is not None)
                 return val_ts
-            if field_name in {"order_subtotal", "order_discount", "shipping_fee", "order_payable"}:
+            if field_name in {
+                "order_subtotal",
+                "order_discount",
+                "shipping_fee",
+                "order_payable",
+                "amount_paid",
+                "amount_due",
+            }:
                 val_m = parse_money(raw_val)
                 tracker.record(f"orders.{field_name}", raw_val, val_m is not None)
                 return val_m
@@ -837,6 +863,8 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
             "order_discount",
             "shipping_fee",
             "order_payable",
+            "amount_paid",
+            "amount_due",
         ]
         active_derived_fields = [f for f in derived_fields if f in ocols]
 
@@ -910,6 +938,8 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
                     "order_discount": resolved_fields["order_discount"],
                     "shipping_fee": resolved_fields["shipping_fee"],
                     "order_payable": resolved_fields["order_payable"],
+                    "amount_paid": resolved_fields["amount_paid"],
+                    "amount_due": resolved_fields["amount_due"],
                 }
             )
     else:
@@ -929,6 +959,8 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
         c_o_disc = ocols.get("order_discount")
         c_o_ship = ocols.get("shipping_fee")
         c_o_pay = ocols.get("order_payable")
+        c_o_paid = ocols.get("amount_paid")
+        c_o_due = ocols.get("amount_due")
 
         for chunk in order_chunks:
             for s_row in chunk.df.to_dict("records"):
@@ -998,6 +1030,14 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
                 pay_val = parse_money(pay_raw)
                 tracker.record("orders.order_payable", pay_raw, pay_val is not None)
 
+                paid_raw = s_row[c_o_paid] if c_o_paid is not None else None
+                paid_val = parse_money(paid_raw)
+                tracker.record("orders.amount_paid", paid_raw, paid_val is not None)
+
+                due_raw = s_row[c_o_due] if c_o_due is not None else None
+                due_val = parse_money(due_raw)
+                tracker.record("orders.amount_due", due_raw, due_val is not None)
+
                 has_ret = (mapped_status == "returned") or (
                     mapping.return_rule == "negative_qty"
                     and oid is not None
@@ -1028,6 +1068,8 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
                         "order_discount": disc_val,
                         "shipping_fee": ship_val,
                         "order_payable": pay_val,
+                        "amount_paid": paid_val,
+                        "amount_due": due_val,
                     }
                 )
 
@@ -1083,16 +1125,35 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
     if mapping.data_end_date is not None:
         after_end = sum(1 for d in valid_dates if d > mapping.data_end_date)
 
+    from datamate.etl.simple import load_all_simple_tables
+
+    walk_in_for_simple: set[str] = {
+        nk for v in mapping.walk_in_values if (nk := normalize_label(v)) is not None
+    }
+    simple_tables = load_all_simple_tables(
+        raw,
+        mapping,
+        tracker,
+        warnings,
+        dedupe_counts,
+        key_by_name=key_by_name,
+        walk_in_norm_set=walk_in_for_simple,
+    )
+
     final_parse_stats = tracker.finalize()
 
+    rows_per_table = {
+        "orders": len(orders_df),
+        "order_lines": len(order_lines_df),
+        "products": len(products_df),
+        "unit_conversions": len(unit_conv_df),
+        "customers": len(customers_df),
+    }
+    for name, frame in simple_tables.items():
+        rows_per_table[name] = len(frame)
+
     report = EtlReport(
-        rows_per_table={
-            "orders": len(orders_df),
-            "order_lines": len(order_lines_df),
-            "products": len(products_df),
-            "unit_conversions": len(unit_conv_df),
-            "customers": len(customers_df),
-        },
+        rows_per_table=rows_per_table,
         fill_counts=dict(sorted(fill_counts.items())),
         dedupe_counts=dict(sorted(dedupe_counts.items())),
         parse_stats=dict(sorted(final_parse_stats.items())),
@@ -1120,4 +1181,5 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
         unit_conversions=unit_conv_df,
         customers=customers_df,
         report=report,
+        **simple_tables,
     )

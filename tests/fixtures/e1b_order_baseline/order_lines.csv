@@ -1,0 +1,3 @@
+order_id,line_no,product_key,product_id,product_name,qty,unit,qty_base,unit_price,line_discount,line_amount,cost_per_unit,is_return_line,src_file,src_sheet,src_row
+ORD001,1,cà phê sữa,,Cà phê sữa,2,,,,,60000,,False,SoBanHang.xlsx,Ban,2
+ORD002,1,trà đào,,Trà đào,1,,,,,40000,,False,SoBanHang.xlsx,Ban,3

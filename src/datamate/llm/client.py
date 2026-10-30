@@ -18,6 +18,9 @@ from datamate.config import settings
 # Wrong key (401/403), or a stopped deployment / unknown model name (404): every later call
 # fails the same way, so it is an outage of the setup, not a bad answer to abstain on.
 _UNAVAILABLE_STATUS = frozenset({401, 403, 404})
+# A queue that expired or throttled the request; the same request usually succeeds.
+_BUSY_STATUS = frozenset({408, 429})
+_BUSY_RETRY_DELAY_S = 2.0
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
@@ -299,13 +302,18 @@ class LLMClient:
         started: float,
         error_prefix: str,
     ) -> tuple[httpx.Response, bool]:
-        """POST `body` once. On timeout, repeat that same request a single time."""
+        """POST `body` once. On a timeout, or a busy server that dropped the request
+        (HTTP 408/429), repeat that same request a single time."""
         try:
-            return self._http.post(url, json=body), False
+            resp = self._http.post(url, json=body)
         except httpx.TimeoutException:
             pass
         except httpx.HTTPError as exc:
             raise LLMUnavailable(f"{error_prefix}: {exc}") from exc
+        else:
+            if resp.status_code not in _BUSY_STATUS:
+                return resp, False
+            time.sleep(_BUSY_RETRY_DELAY_S)
 
         try:
             return self._http.post(url, json=body), True

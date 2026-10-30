@@ -6,6 +6,7 @@ from pathlib import Path
 
 import duckdb
 import openpyxl
+import pandas as pd
 import pytest
 
 from datamate.etl import MappingError, build_canonical, write_duckdb
@@ -511,3 +512,531 @@ def test_name_only_sales_lines_take_the_catalog_code_key(tmp_path: Path) -> None
     assert keys["Trà Sữa (M)"] == "TS01"
     assert keys["Cà phê"] == "CF01"
     assert keys["Bánh"] == "bánh"  # two codes share the name: left on the name key
+
+
+def _order_only_mapping() -> Mapping:
+    return Mapping.model_validate(
+        {
+            "data_end_date": "2025-03-31",
+            "customer_identity": "by_name",
+            "walk_in_values": ["Khách lẻ"],
+            "return_rule": "status",
+            "status_map": {
+                "xong": "completed",
+                "hủy": "cancelled",
+                "trả": "returned",
+                "đang giao": "shipping",
+            },
+            "tables": {
+                "orders": {
+                    "derived_from": "order_lines",
+                    "columns": {
+                        "order_id": "Mã đơn",
+                        "order_date": "Ngày",
+                        "customer_name": "Khách hàng",
+                        "status": "Trạng thái",
+                    },
+                },
+                "order_lines": {
+                    "sources": [
+                        {"file": "SoBanHang.xlsx", "sheet": "*", "header_row": 1}
+                    ],
+                    "columns": {
+                        "order_id": "Mã đơn",
+                        "product_name": "Tên món",
+                        "qty": "SL",
+                        "line_amount": "Thành tiền",
+                    },
+                },
+            },
+        }
+    )
+
+
+def test_simple_tables_load_and_product_key_matches(tmp_path: Path) -> None:
+    wb = openpyxl.Workbook()
+    ws_ban = wb.active
+    assert ws_ban is not None
+    ws_ban.title = "Ban"
+    ws_ban.append(["Mã đơn", "Ngày", "Khách hàng", "Trạng thái", "Tên món", "SL", "Thành tiền"])
+    ws_ban.append(["ORD001", "15/03/2025", "An", "Xong", "Paracetamol 500", "2", "20000"])
+
+    ws_nhap = wb.create_sheet("Nhap")
+    ws_nhap.append(["Phiếu", "Ngày nhập", "NCC", "Tên hàng", "SL", "Thành tiền", "TT"])
+    ws_nhap.append(["PN01", "10/03/2025", "Dược Hà Nội", "paracetamol 500", "10", "80000", "Đã hủy"])
+    ws_nhap.append(["PN02", "11/03/2025", "Dược Hà Nội", "PARACETAMOL 500", "5", "40000", "Hợp lệ"])
+
+    ws_thu = wb.create_sheet("Thu")
+    ws_thu.append(["Ngày thu", "Số tiền", "Hình thức", "Loại"])
+    ws_thu.append(["12/03/2025", "50000", "tiền mặt", "thu nợ"])
+    ws_thu.append(["13/03/2025", "abc", "ck", "trả trước"])  # unparseable money
+
+    ws_chi = wb.create_sheet("Chi")
+    ws_chi.append(["Ngày", "Số tiền", "Loại"])
+    ws_chi.append(["14/03/2025", "15000", "điện"])
+
+    ws_nv = wb.create_sheet("NV")
+    ws_nv.append(["Tên NV", "Mã"])
+    ws_nv.append(["Nguyễn Lan", "NV01"])
+
+    ws_ncc = wb.create_sheet("NCC")
+    ws_ncc.append(["Tên NCC", "Mã"])
+    ws_ncc.append(["Dược Hà Nội", "NCC01"])
+
+    ws_no = wb.create_sheet("No")
+    ws_no.append(["Còn nợ", "Tổng", "Khách"])
+    ws_no.append(["30000", "100000", "An"])
+
+    ws_ton = wb.create_sheet("Ton")
+    ws_ton.append(["Tên hàng", "Tồn"])
+    ws_ton.append(["Paracetamol 500", "7"])
+
+    ws_xnt = wb.create_sheet("XNT")
+    ws_xnt.append(["Ngày", "Tên hàng", "Nhập", "Xuất"])
+    ws_xnt.append(["15/03/2025", "Paracetamol 500", "10", "3"])
+
+    ws_lo = wb.create_sheet("Lo")
+    ws_lo.append(["Lô", "Tên hàng", "HSD", "SL nhập"])
+    ws_lo.append(["L2401", "Paracetamol 500", "31/12/2026", "10"])
+
+    ws_banlo = wb.create_sheet("BanLo")
+    ws_banlo.append(["Mã đơn", "Lô", "Tên hàng", "SL"])
+    ws_banlo.append(["ORD001", "L2401", "Paracetamol 500", "2"])
+
+    ws_gia = wb.create_sheet("Gia")
+    ws_gia.append(["Ngày hiệu lực", "Giá", "Tên hàng"])
+    ws_gia.append(["01/01/2025", "10000", "Paracetamol 500"])
+
+    ws_giao = wb.create_sheet("Giao")
+    ws_giao.append(["Mã đơn", "Ngày giao", "Đợt"])
+    ws_giao.append(["ORD001", "16/03/2025", "1"])
+
+    ws_thuoc = wb.create_sheet("Thuoc")
+    ws_thuoc.append(["Tên hàng", "Hoạt chất", "Kê đơn"])
+    ws_thuoc.append(["Paracetamol 500", "paracetamol", "có"])
+
+    wb.save(tmp_path / "shop.xlsx")
+    wb.close()
+
+    mapping = Mapping.model_validate(
+        {
+            "data_end_date": "2025-03-31",
+            "customer_identity": "by_name",
+            "walk_in_values": ["Khách lẻ"],
+            "return_rule": "status",
+            "status_map": {"xong": "completed"},
+            "purchase_status_map": {"đã hủy": "cancelled", "hợp lệ": "valid"},
+            "tables": {
+                "orders": {
+                    "derived_from": "order_lines",
+                    "columns": {
+                        "order_id": "Mã đơn",
+                        "order_date": "Ngày",
+                        "customer_name": "Khách hàng",
+                        "status": "Trạng thái",
+                        "amount_paid": "Thành tiền",
+                    },
+                },
+                "order_lines": {
+                    "sources": [{"file": "shop.xlsx", "sheet": "Ban", "header_row": 1}],
+                    "columns": {
+                        "order_id": "Mã đơn",
+                        "product_name": "Tên món",
+                        "qty": "SL",
+                        "line_amount": "Thành tiền",
+                    },
+                },
+                "purchases": {
+                    "sources": [{"file": "shop.xlsx", "sheet": "Nhap", "header_row": 1}],
+                    "columns": {
+                        "receipt_id": "Phiếu",
+                        "receipt_date": "Ngày nhập",
+                        "supplier_name": "NCC",
+                        "status_raw": "TT",
+                        "total_amount": "Thành tiền",
+                    },
+                },
+                "purchase_lines": {
+                    "sources": [{"file": "shop.xlsx", "sheet": "Nhap", "header_row": 1}],
+                    "columns": {
+                        "receipt_id": "Phiếu",
+                        "receipt_date": "Ngày nhập",
+                        "supplier_name": "NCC",
+                        "product_name": "Tên hàng",
+                        "qty": "SL",
+                        "line_amount": "Thành tiền",
+                    },
+                },
+                "payments": {
+                    "sources": [{"file": "shop.xlsx", "sheet": "Thu", "header_row": 1}],
+                    "columns": {
+                        "pay_date": "Ngày thu",
+                        "amount": "Số tiền",
+                        "method": "Hình thức",
+                        "kind_raw": "Loại",
+                    },
+                },
+                "expenses": {
+                    "sources": [{"file": "shop.xlsx", "sheet": "Chi", "header_row": 1}],
+                    "columns": {
+                        "expense_date": "Ngày",
+                        "amount": "Số tiền",
+                        "category": "Loại",
+                    },
+                },
+                "employees": {
+                    "sources": [{"file": "shop.xlsx", "sheet": "NV", "header_row": 1}],
+                    "columns": {"employee_name": "Tên NV", "employee_id": "Mã"},
+                },
+                "suppliers": {
+                    "sources": [{"file": "shop.xlsx", "sheet": "NCC", "header_row": 1}],
+                    "columns": {"supplier_name": "Tên NCC", "supplier_id": "Mã"},
+                },
+                "debts": {
+                    "sources": [{"file": "shop.xlsx", "sheet": "No", "header_row": 1}],
+                    "columns": {
+                        "amount_remaining": "Còn nợ",
+                        "amount_total": "Tổng",
+                        "customer_name": "Khách",
+                    },
+                },
+                "stock_snapshot": {
+                    "sources": [{"file": "shop.xlsx", "sheet": "Ton", "header_row": 1}],
+                    "columns": {"product_name": "Tên hàng", "qty_on_hand": "Tồn"},
+                },
+                "stock_moves": {
+                    "sources": [{"file": "shop.xlsx", "sheet": "XNT", "header_row": 1}],
+                    "columns": {
+                        "move_date": "Ngày",
+                        "product_name": "Tên hàng",
+                        "qty_in": "Nhập",
+                        "qty_out": "Xuất",
+                    },
+                },
+                "lots": {
+                    "sources": [{"file": "shop.xlsx", "sheet": "Lo", "header_row": 1}],
+                    "columns": {
+                        "lot_id": "Lô",
+                        "product_name": "Tên hàng",
+                        "expiry_date": "HSD",
+                        "qty_received": "SL nhập",
+                    },
+                },
+                "sale_lots": {
+                    "sources": [{"file": "shop.xlsx", "sheet": "BanLo", "header_row": 1}],
+                    "columns": {
+                        "order_id": "Mã đơn",
+                        "lot_id": "Lô",
+                        "product_name": "Tên hàng",
+                        "qty": "SL",
+                    },
+                },
+                "price_history": {
+                    "sources": [{"file": "shop.xlsx", "sheet": "Gia", "header_row": 1}],
+                    "columns": {
+                        "effective_date": "Ngày hiệu lực",
+                        "price": "Giá",
+                        "product_name": "Tên hàng",
+                    },
+                },
+                "deliveries": {
+                    "sources": [{"file": "shop.xlsx", "sheet": "Giao", "header_row": 1}],
+                    "columns": {
+                        "order_id": "Mã đơn",
+                        "delivery_date": "Ngày giao",
+                        "batch_no": "Đợt",
+                    },
+                },
+                "drug_info": {
+                    "sources": [{"file": "shop.xlsx", "sheet": "Thuoc", "header_row": 1}],
+                    "columns": {
+                        "product_name": "Tên hàng",
+                        "active_ingredient": "Hoạt chất",
+                        "is_prescription": "Kê đơn",
+                    },
+                },
+            },
+        }
+    )
+
+    canon = build_canonical(read_business(tmp_path), mapping)
+
+    assert len(canon.purchase_lines) == 2
+    assert len(canon.order_lines) == 1
+    sale_key = canon.order_lines.iloc[0]["product_key"]
+    buy_keys = set(canon.purchase_lines["product_key"])
+    assert sale_key in buy_keys
+    assert len(buy_keys) == 1  # case/diacritic variants collapse
+
+    assert len(canon.purchases) == 2
+    by_receipt = canon.purchases.set_index("receipt_id")
+    assert by_receipt.loc["PN01", "is_cancelled"] is True
+    assert by_receipt.loc["PN02", "is_cancelled"] is False
+
+    # Unparseable amount -> required field None -> row dropped (still tracked in parse_stats).
+    assert len(canon.payments) == 1
+    assert canon.report.dedupe_counts["payments.missing_required"] == 1
+    pay_stat = canon.report.parse_stats["payments.amount"]
+    assert pay_stat.non_null == 2
+    assert pay_stat.parsed == 1
+    assert pay_stat.examples  # unparseable "abc" recorded, no crash
+
+    assert len(canon.expenses) == 1
+    assert len(canon.employees) == 1
+    assert len(canon.suppliers) == 1
+    assert len(canon.debts) == 1
+    assert canon.debts.iloc[0]["as_of_date"] == datetime.date(2025, 3, 31)
+    assert len(canon.stock_snapshot) == 1
+    assert canon.stock_snapshot.iloc[0]["as_of_date"] == datetime.date(2025, 3, 31)
+    assert len(canon.stock_moves) == 1
+    assert len(canon.lots) == 1
+    assert len(canon.sale_lots) == 1
+    assert len(canon.price_history) == 1
+    assert len(canon.deliveries) == 1
+    assert len(canon.drug_info) == 1
+    assert canon.drug_info.iloc[0]["is_prescription"] is True
+
+    assert canon.orders.iloc[0]["amount_paid"] == 20000
+    assert canon.report.rows_per_table["payments"] == 1
+    assert canon.report.rows_per_table["purchases"] == 2
+
+    db_file = tmp_path / "full.duckdb"
+    write_duckdb(canon, db_file)
+    conn = duckdb.connect(str(db_file), read_only=True)
+    try:
+        tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
+        assert "payments" in tables
+        assert "drug_info" in tables
+        assert conn.execute("SELECT COUNT(*) FROM payments").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM purchases").fetchone()[0] == 2
+    finally:
+        conn.close()
+
+
+def test_missing_simple_table_yields_empty(tmp_path: Path) -> None:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = "Ban"
+    ws.append(["Mã đơn", "Ngày", "Khách hàng", "Trạng thái", "Tên món", "SL", "Thành tiền"])
+    ws.append(["ORD001", "15/03/2025", "An", "Xong", "Cà phê", "1", "10000"])
+    wb.save(tmp_path / "SoBanHang.xlsx")
+    wb.close()
+
+    canon = build_canonical(read_business(tmp_path), _order_only_mapping())
+    assert canon.payments.empty
+    assert canon.purchases.empty
+    assert canon.expenses.empty
+    assert canon.report.rows_per_table["payments"] == 0
+    assert "amount_paid" in canon.orders.columns
+    assert canon.orders.iloc[0]["amount_paid"] is None
+
+
+def test_order_path_matches_e1b_baseline_fixture(tmp_path: Path) -> None:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = "Ban"
+    ws.append(["Mã đơn", "Ngày", "Khách hàng", "Trạng thái", "Tên món", "SL", "Thành tiền"])
+    ws.append(["ORD001", "15/03/2025", "Nguyễn Văn A", "Xong", "Cà phê sữa", "2", "60000"])
+    ws.append(["ORD002", "16/03/2025", "Khách lẻ", "xong", "Trà đào", "1", "40000"])
+    wb.save(tmp_path / "SoBanHang.xlsx")
+    wb.close()
+
+    canon = build_canonical(read_business(tmp_path), _order_only_mapping())
+    fixture_dir = Path(__file__).parent / "fixtures" / "e1b_order_baseline"
+
+    got_orders = canon.orders.drop(columns=["amount_paid", "amount_due"])
+    exp_orders = pd.read_csv(fixture_dir / "orders.csv")
+    # Normalize dtypes via csv round-trip for stable compare.
+    assert got_orders.to_csv(index=False) == exp_orders.to_csv(index=False)
+
+    exp_lines = pd.read_csv(fixture_dir / "order_lines.csv")
+    assert canon.order_lines.to_csv(index=False) == exp_lines.to_csv(index=False)
+
+    exp_products = pd.read_csv(fixture_dir / "products.csv")
+    assert canon.products.to_csv(index=False) == exp_products.to_csv(index=False)
+
+
+def test_expenses_drops_total_and_blank_rows(tmp_path: Path) -> None:
+    # P2 already drops true "Tổng cộng"/empty rows; rows that survive with a missing
+    # required field (unparseable date, blank amount) are dropped here.
+    (tmp_path / "ban.csv").write_text(
+        "Ngày,Khách,Món,SL,Tiền,Trạng thái\n"
+        "01/03/2025,An,Cà phê,1,10000,xong\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "chi.csv").write_text(
+        "Ngày,Số tiền,Loại\n"
+        "01/03/2025,15000,điện\n"
+        "02/03/2025,20000,nước\n"
+        "Tổng cộng,35000,\n"
+        ",,\n"
+        "cuối trang,,phụ\n"
+        "03/03/2025,,rác\n",
+        encoding="utf-8",
+    )
+    mapping = Mapping.model_validate(
+        {
+            "data_end_date": "2025-03-31",
+            "customer_identity": "by_name",
+            "walk_in_values": [],
+            "return_rule": "status",
+            "status_map": {"xong": "completed"},
+            "tables": {
+                "orders": {
+                    "derived_from": "order_lines",
+                    "columns": {
+                        "order_date": "Ngày",
+                        "customer_name": "Khách",
+                        "status": "Trạng thái",
+                    },
+                },
+                "order_lines": {
+                    "sources": [{"file": "ban.csv", "sheet": None, "header_row": 1}],
+                    "columns": {
+                        "product_name": "Món",
+                        "qty": "SL",
+                        "line_amount": "Tiền",
+                    },
+                },
+                "expenses": {
+                    "sources": [{"file": "chi.csv", "sheet": None, "header_row": 1}],
+                    "columns": {
+                        "expense_date": "Ngày",
+                        "amount": "Số tiền",
+                        "category": "Loại",
+                    },
+                },
+            },
+        }
+    )
+    canon = build_canonical(read_business(tmp_path), mapping)
+    assert len(canon.expenses) == 2
+    assert canon.report.dedupe_counts["expenses.missing_required"] == 2
+    assert set(canon.expenses["category"]) == {"điện", "nước"}
+
+
+def test_simple_mapping_error_yields_empty_not_shop_failure(tmp_path: Path) -> None:
+    (tmp_path / "ban.csv").write_text(
+        "Ngày,Khách,Món,SL,Tiền,Trạng thái\n"
+        "01/03/2025,An,Cà phê,1,10000,xong\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "chi.csv").write_text(
+        "Ngày,Số tiền,Loại\n"
+        "01/03/2025,15000,điện\n",
+        encoding="utf-8",
+    )
+    mapping = Mapping.model_validate(
+        {
+            "data_end_date": "2025-03-31",
+            "customer_identity": "by_name",
+            "walk_in_values": [],
+            "return_rule": "status",
+            "status_map": {"xong": "completed"},
+            "tables": {
+                "orders": {
+                    "derived_from": "order_lines",
+                    "columns": {
+                        "order_date": "Ngày",
+                        "customer_name": "Khách",
+                        "status": "Trạng thái",
+                    },
+                },
+                "order_lines": {
+                    "sources": [{"file": "ban.csv", "sheet": None, "header_row": 1}],
+                    "columns": {
+                        "product_name": "Món",
+                        "qty": "SL",
+                        "line_amount": "Tiền",
+                    },
+                },
+                "expenses": {
+                    "sources": [{"file": "chi.csv", "sheet": None, "header_row": 1}],
+                    "columns": {
+                        "expense_date": "Ngày",
+                        "amount": "Cột không tồn tại",
+                        "category": "Loại",
+                    },
+                },
+            },
+        }
+    )
+    canon = build_canonical(read_business(tmp_path), mapping)
+    assert len(canon.orders) == 1
+    assert canon.expenses.empty
+    assert any(w.startswith("expenses:") for w in canon.report.warnings)
+
+
+def test_parse_bool_prescription_aliases() -> None:
+    from datamate.etl.simple import _parse_bool
+
+    assert _parse_bool("kê đơn") is True
+    assert _parse_bool("ke don") is True
+    assert _parse_bool("RX") is True
+    assert _parse_bool("không kê đơn") is False
+    assert _parse_bool("otc") is False
+
+
+def test_customers_phone_and_orders_amount_due(tmp_path: Path) -> None:
+    (tmp_path / "orders.csv").write_text(
+        "order_id,order_date,status,customer_id,paid,due\n"
+        "ORD01,2025-05-01,completed,KH01,70000,30000\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "lines.csv").write_text(
+        "order_id,product_name,qty,line_amount\n"
+        "ORD01,Cà phê,1,100000\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "customers.csv").write_text(
+        "customer_id,customer_name,phone\n"
+        "KH01,Nguyễn A,0912345678\n",
+        encoding="utf-8",
+    )
+    mapping = Mapping.model_validate(
+        {
+            "data_end_date": "2025-05-31",
+            "customer_identity": "by_code",
+            "walk_in_values": [],
+            "return_rule": "status",
+            "status_map": {"completed": "completed"},
+            "tables": {
+                "orders": {
+                    "sources": [{"file": "orders.csv", "sheet": None, "header_row": 1}],
+                    "columns": {
+                        "order_id": "order_id",
+                        "order_date": "order_date",
+                        "status": "status",
+                        "customer_id": "customer_id",
+                        "amount_paid": "paid",
+                        "amount_due": "due",
+                    },
+                },
+                "order_lines": {
+                    "sources": [{"file": "lines.csv", "sheet": None, "header_row": 1}],
+                    "columns": {
+                        "order_id": "order_id",
+                        "product_name": "product_name",
+                        "qty": "qty",
+                        "line_amount": "line_amount",
+                    },
+                },
+                "customers": {
+                    "sources": [
+                        {"file": "customers.csv", "sheet": None, "header_row": 1}
+                    ],
+                    "columns": {
+                        "customer_id": "customer_id",
+                        "customer_name": "customer_name",
+                        "phone": "phone",
+                    },
+                },
+            },
+        }
+    )
+    canon = build_canonical(read_business(tmp_path), mapping)
+    assert canon.orders.iloc[0]["amount_paid"] == 70000
+    assert canon.orders.iloc[0]["amount_due"] == 30000
+    assert canon.customers.iloc[0]["phone"] == "0912345678"

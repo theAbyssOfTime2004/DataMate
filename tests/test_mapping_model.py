@@ -95,6 +95,43 @@ def test_missing_orders_or_order_lines_raises() -> None:
         Mapping.model_validate(raw)
 
 
+def test_old_yaml_loads_with_empty_purchase_status_map() -> None:
+    m = Mapping.model_validate(_minimal_mapping_dict())
+    assert m.purchase_status_map == {}
+    assert "customers" not in m.tables
+
+
+def test_fingerprint_ignores_empty_purchase_status_map() -> None:
+    """Empty purchase_status_map must not change fingerprints of pre-E1b order-only mappings."""
+    import hashlib
+    import json
+
+    m = Mapping.model_validate(_minimal_mapping_dict())
+    payload = m.model_dump(mode="json", exclude={"business_id", "notes"})
+    assert payload.get("purchase_status_map") == {}
+    payload.pop("purchase_status_map", None)
+    expected = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    assert mapping_fingerprint(m) == expected
+    # Stable known value for the minimal fixture (order-only, no new entities).
+    assert mapping_fingerprint(m) == (
+        "7e27a6d1f2f5b11ef660d8da81dd8865195ff688101db329071e7f090cc0153f"
+    )
+
+
+def test_purchase_status_map_accepted() -> None:
+    raw = _minimal_mapping_dict()
+    raw["purchase_status_map"] = {"đã hủy": "cancelled", "ok": "valid"}
+    raw["tables"]["payments"] = {
+        "sources": [{"file": "pay.csv", "sheet": None, "header_row": 1}],
+        "columns": {"pay_date": "Ngày", "amount": "Số tiền"},
+    }
+    m = Mapping.model_validate(raw)
+    assert m.purchase_status_map == {"đã hủy": "cancelled", "ok": "valid"}
+    assert "payments" in m.tables
+
+
 def test_strict_bool_yaml_loader_preserves_on_yes_no_strings(tmp_path: Path) -> None:
     yaml_text = """
 data_end_date: 2026-08-31

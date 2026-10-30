@@ -11,7 +11,7 @@ from datamate.config import settings
 from datamate.io.profile import BusinessProfile, ColumnProfile, TableProfile, render_card
 from datamate.io.raw import BusinessRaw, RawTable
 from datamate.llm.client import LLMError, LLMUnavailable
-from datamate.mapping.fields import FIELD_DOCS, REQUIRED_FIELDS
+from datamate.mapping.fields import FIELD_DOCS, LATER_FIELDS, REQUIRED_FIELDS
 from datamate.mapping.model import (
     Entity,
     JoinSpec,
@@ -338,7 +338,7 @@ def _build_step_b_variants(
     readme_text: str | None,
     orders_source: str = "own_table",
 ) -> list[str]:
-    fdocs = FIELD_DOCS[entity]
+    fdocs = _step_b_field_docs(entity)
     req = REQUIRED_FIELDS.get(entity, set())
     field_lines = [
         f"- `{fname}` ({'REQUIRED' if fname in req else 'optional'}): {desc}"
@@ -403,12 +403,17 @@ def _build_step_b_variants(
     return variants
 
 
+def _step_b_field_docs(entity: Entity) -> dict[str, str]:
+    later = LATER_FIELDS.get(entity, frozenset())
+    return {name: doc for name, doc in FIELD_DOCS[entity].items() if name not in later}
+
+
 def _step_b_required_names(entity: Entity, orders_source: str) -> list[str]:
     """Canonical fields that must be present. Optional omissions are filled with null."""
     required = set(REQUIRED_FIELDS.get(entity, ()))
     if entity == "orders" and orders_source == "own_table":
         required.add("order_id")
-    return [name for name in FIELD_DOCS[entity] if name in required]
+    return [name for name in _step_b_field_docs(entity) if name in required]
 
 
 def _step_b_schema(
@@ -420,7 +425,9 @@ def _step_b_schema(
     required_names = _step_b_required_names(entity, orders_source)
     required_set = set(required_names)
     # Required fields first so a truncated answer still contains them.
-    ordered = required_names + [name for name in FIELD_DOCS[entity] if name not in required_set]
+    ordered = required_names + [
+        name for name in _step_b_field_docs(entity) if name not in required_set
+    ]
     props = {fname: {"enum": col_enum} for fname in ordered}
     return {
         "type": "object",
