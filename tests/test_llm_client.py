@@ -151,7 +151,13 @@ def test_unreachable_or_5xx_server_is_unavailable_not_a_bad_answer(tmp_path: Pat
     def bad_request(request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, text="prompt too long")
 
-    for handler in (overloaded, refused):
+    def stopped_app(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="modal-http: invalid function call")
+
+    def wrong_key(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, text="unauthorized")
+
+    for handler in (overloaded, refused, stopped_app, wrong_key):
         client = LLMClient(
             base_url="http://mock-server:8000/v1",
             cache_dir=tmp_path,

@@ -15,6 +15,9 @@ import httpx
 
 from datamate.config import settings
 
+# Wrong key (401/403), or a stopped deployment / unknown model name (404): every later call
+# fails the same way, so it is an outage of the setup, not a bad answer to abstain on.
+_UNAVAILABLE_STATUS = frozenset({401, 403, 404})
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
@@ -238,7 +241,7 @@ class LLMClient:
             )
             retried = retried or fallback_retried
 
-        if resp.status_code >= 500:
+        if resp.status_code >= 500 or resp.status_code in _UNAVAILABLE_STATUS:
             raise LLMUnavailable(f"LLM server error (HTTP {resp.status_code}): {resp.text}")
         if resp.status_code != 200:
             raise LLMError(f"LLM server error (HTTP {resp.status_code}): {resp.text}")
