@@ -16,7 +16,7 @@ from datamate.io.paths import business_dir
 from datamate.io.raw import _compute_business_cache_key, load_business_cached
 from datamate.mapping.model import Mapping, mapping_fingerprint
 
-ETL_VERSION = "1.3"  # 1.3: orders without status, mostly blank status = completed
+ETL_VERSION = "1.4"  # 1.4: name-only sales lines take the catalog code key
 
 _COLUMN_SQL_TYPES: dict[str, dict[str, str]] = {
     "orders": {

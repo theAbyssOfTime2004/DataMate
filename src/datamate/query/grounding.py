@@ -42,7 +42,9 @@ _CUES: dict[str, tuple[str, ...]] = {
     "payment_method": ("tra", "thanh toan", "vi"),
     "channel": ("kenh", "qua", "tai", "online", "offline"),
     "category": ("nhom", "loai", "thuoc", "mon", "dong", "hang", "nganh"),
+    "product": ("mat hang", "san pham", "mon", "nhom", "loai", "thuoc"),
 }
+PRODUCT_CUES = _CUES["product"]
 _GENERIC = frozenset({"ca", "khach", "nhom", "hang", "loai", "thu", "le"})
 _YEAR_WORDS = ("nam", "yoy")
 _JAN_FIRST = re.compile(r"(?<!\d)0?1/0?1(?![\d/])")
@@ -51,6 +53,10 @@ _JAN_FIRST = re.compile(r"(?<!\d)0?1/0?1(?![\d/])")
 _THRESHOLD = re.compile(
     r"\b(?:tro len|tro xuong)\b|\b(?:it nhat|toi thieu|toi da|tren|duoi|vuot qua|vuot) \d"
 )
+_THRESHOLD_SIGN = re.compile(r"(?:[≥≤]|[<>]=?)\s*\d")
+# Product attributes the rulebook defines from a drug catalog (§6). Until the catalog is
+# loaded and has metrics, a question filtering on them is out of scope.
+_UNSUPPORTED_ATTRIBUTES = ("hoat chat", "ke don")
 
 
 def fold(text: str) -> str:
@@ -58,6 +64,11 @@ def fold(text: str) -> str:
     nfd = unicodedata.normalize("NFD", text.casefold())
     bare = "".join(ch for ch in nfd if unicodedata.category(ch) != "Mn").replace("đ", "d")
     return " ".join(_TOKEN.findall(bare))
+
+
+def _marked_words(text: str) -> list[str]:
+    """Lowercase words with their diacritics kept."""
+    return re.findall(r"\w+", unicodedata.normalize("NFC", text.casefold()))
 
 
 def _same_word(written: str, wanted: str) -> bool:
@@ -73,6 +84,7 @@ class QuestionText:
         self.folded = fold(question)
         self.words = self.folded.split()
         self.tokens = frozenset(self.words)
+        self._marked = _marked_words(question)
 
     def has_word(self, wanted: str) -> bool:
         return any(_same_word(word, wanted) for word in self.words)
@@ -92,6 +104,34 @@ class QuestionText:
         if all(self.has_word(word) for word in folded.split()):
             return True
         return any(self.has_phrase(alias) for alias in _ALIASES.get(folded, ()))
+
+    def product_word_hits(self, name: str) -> tuple[int, int]:
+        """(words of the name found in the question, words that count).
+
+        Pack sizes (330ml, 20) and one-letter size marks ((M), (L)) do not count. A word
+        typed with diacritics must keep them: "đầu" in the question is not "dâu" in the
+        name, while an unaccented "dau" may be either.
+        """
+        words = [
+            word
+            for word in _marked_words(name)
+            if len(word) >= 2 and not any(ch.isdigit() for ch in word)
+        ]
+        hits = sum(1 for word in words if self._has_marked_word(word))
+        return hits, len(words)
+
+    def mentions_product(self, name: str) -> bool:
+        hits, total = self.product_word_hits(name)
+        return total > 0 and hits == total
+
+    def _has_marked_word(self, wanted: str) -> bool:
+        bare = fold(wanted)
+        for word in self._marked:
+            if not _same_word(fold(word), bare):
+                continue
+            if fold(word) == word or word.startswith(wanted):
+                return True
+        return False
 
     def is_stray(self, field: str, value: str) -> bool:
         """An unmentioned value that shares no specific word with the question, which has
@@ -113,4 +153,7 @@ class QuestionText:
         return bool(_JAN_FIRST.search(self.raw))
 
     def has_threshold(self) -> bool:
-        return bool(_THRESHOLD.search(self.folded))
+        return bool(_THRESHOLD.search(self.folded) or _THRESHOLD_SIGN.search(self.raw))
+
+    def has_unsupported_attribute(self) -> bool:
+        return any(self.has_phrase(phrase) for phrase in _UNSUPPORTED_ATTRIBUTES)

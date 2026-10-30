@@ -49,7 +49,8 @@ def parse_question(
 ) -> ParseResult:
     """Parse one question. as_of is the question's 'today', not the shop's data end."""
     vote_count = settings.parse_votes if votes is None else votes
-    if QuestionText(question).has_threshold():
+    text = QuestionText(question)
+    if text.has_threshold() or text.has_unsupported_attribute():
         return ParseResult(spec=None, reason="out_of_scope", attempts=[])
     products = ctx.product_candidates(question)
     schema = parsed_question_schema(ctx, products)

@@ -588,3 +588,38 @@ def test_load_shop_context_uses_frequency_and_the_common_spelling() -> None:
     assert ctx.has_order_ts is True
     assert ctx.data_start == datetime.date(2024, 5, 1)
     assert ctx.data_end == datetime.date(2024, 5, 3)
+
+
+def test_product_values_must_be_named_in_the_question() -> None:
+    sting = _parsed(periods=[{"kind": "ytd"}], filters=_filters(product=["Sting dâu 330ml"]))
+    stray = _grounded(sting, "Doanh thu từ đầu năm tới hết hôm nay là bao nhiêu?")
+    assert stray.query.filters.product == []  # đầu is not dâu
+    with pytest.raises(ConvertError):  # without diacritics "dau" may be dâu: abstain
+        _grounded(sting, "doanh thu tu dau nam toi het hom nay la bao nhieu")
+
+    named = _grounded(
+        _parsed(filters=_filters(product=["Trà vải (M)", "Trà vải (L)"])),
+        "thang nay mat hang tra vai thu ve bao nhieu",
+    )
+    assert named.query.filters.product == ["Trà vải (M)", "Trà vải (L)"]
+
+    with pytest.raises(ConvertError, match="category"):
+        _grounded(
+            _parsed(filters=_filters(product=["Lẩu dê"])),
+            "doanh thu nhom hang lau thang nay la bao nhieu",
+        )
+
+
+def test_drug_attributes_and_sign_thresholds_are_out_of_scope() -> None:
+    for question in (
+        "Doanh thu thuốc hoạt chất Paracetamol tháng 9/2025 là bao nhiêu?",
+        "Trừ thuốc kê đơn ra, tháng 8/2026 các mặt hàng còn lại bán được bao nhiêu tiền?",
+        "trong thang 3 nam 2026, so ngay co dthu ≥ 53.000.000 dong la bn",
+        "so don co tien hang >= 100000 thang nay",
+    ):
+        client = FakeClient([])
+        result = parse_question(
+            question, _shop(), client, RuleConfig(), LunarCalendar({}), AS_OF
+        )
+        assert result.reason == "out_of_scope", question
+        assert client.sent == []

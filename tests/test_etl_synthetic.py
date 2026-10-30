@@ -471,3 +471,43 @@ def test_mostly_blank_status_column_only_marks_exceptions(tmp_path: Path) -> Non
     canon = build_canonical(read_business(tmp_path), mapping)
     assert sorted(canon.orders["status"]) == ["completed", "completed", "returned"]
     assert any("mostly blank" in note for note in canon.report.notes)
+
+
+def test_name_only_sales_lines_take_the_catalog_code_key(tmp_path: Path) -> None:
+    (tmp_path / "ban.csv").write_text(
+        "Ngày,Trạng thái,Tên hàng,Tiền\n"
+        "01/08/2026,xong,Trà Sữa (M),30000\n"
+        "01/08/2026,xong,Cà phê,20000\n"
+        "02/08/2026,xong,Bánh,10000\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "hang.csv").write_text(
+        "Mã,Tên,Nhóm\nTS01,trà sữa (m),trà sữa\nCF01,Cà phê,cà phê\nB01,Bánh,bánh\nB02,Bánh,bánh\n",
+        encoding="utf-8",
+    )
+    mapping = Mapping.model_validate(
+        {
+            "customer_identity": "by_name",
+            "return_rule": "status",
+            "status_map": {"xong": "completed"},
+            "tables": {
+                "products": {
+                    "sources": [{"file": "hang.csv", "sheet": None, "header_row": 1}],
+                    "columns": {"product_id": "Mã", "product_name": "Tên", "category": "Nhóm"},
+                },
+                "orders": {
+                    "derived_from": "order_lines",
+                    "columns": {"order_date": "Ngày", "status": "Trạng thái"},
+                },
+                "order_lines": {
+                    "sources": [{"file": "ban.csv", "sheet": None, "header_row": 1}],
+                    "columns": {"product_name": "Tên hàng", "line_amount": "Tiền"},
+                },
+            },
+        }
+    )
+    canon = build_canonical(read_business(tmp_path), mapping)
+    keys = dict(zip(canon.order_lines["product_name"], canon.order_lines["product_key"]))
+    assert keys["Trà Sữa (M)"] == "TS01"
+    assert keys["Cà phê"] == "CF01"
+    assert keys["Bánh"] == "bánh"  # two codes share the name: left on the name key

@@ -319,12 +319,43 @@ def _build_customers(
     return _records_to_df(rows, CUSTOMERS_COLUMNS)
 
 
+def _product_key_by_name(products_df: pd.DataFrame) -> dict[str, str]:
+    """Catalog name -> product_key for catalogs keyed by code.
+
+    Sales lines that record only the product name must land on the catalog's code key,
+    otherwise category, unit cost and base unit never join. A name used by two codes is
+    ambiguous and is left out.
+    """
+    if products_df.empty:
+        return {}
+    keys_by_name: dict[str, set[str]] = {}
+    for row in products_df.to_dict("records"):
+        pid, pname, pkey = row.get("product_id"), row.get("product_name"), row.get("product_key")
+        norm = normalize_label(pname) if isinstance(pname, str) else None
+        if pid is None or norm is None or pkey is None:
+            continue
+        keys_by_name.setdefault(norm, set()).add(str(pkey))
+    return {name: next(iter(keys)) for name, keys in keys_by_name.items() if len(keys) == 1}
+
+
+def _line_product_key(
+    pid: str | None, pname: str | None, key_by_name: dict[str, str]
+) -> str | None:
+    if pid is not None:
+        return pid
+    norm = normalize_label(pname)
+    if norm is None:
+        return None
+    return key_by_name.get(norm, norm)
+
+
 def _build_unit_conversions(
     raw: BusinessRaw,
     mapping: Mapping,
     tracker: _StatTracker,
     warnings: list[str],
     notes: list[str],
+    key_by_name: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     tm = mapping.tables.get("unit_conversions")
     if tm is None:
@@ -369,7 +400,7 @@ def _build_unit_conversions(
         factor: Decimal | None = qty_parsed[0] if qty_parsed is not None else parse_decimal(factor_raw)
         tracker.record("unit_conversions.factor", factor_raw, factor is not None)
 
-        pkey = pid if pid is not None else normalize_label(pname)
+        pkey = _line_product_key(pid, pname, key_by_name or {})
         rows.append(
             {
                 "product_key": pkey,
@@ -475,7 +506,8 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
 
     products_df = _build_products(raw, mapping, tracker, warnings)
     customers_df = _build_customers(raw, mapping, tracker, warnings)
-    unit_conv_df = _build_unit_conversions(raw, mapping, tracker, warnings, notes)
+    key_by_name = _product_key_by_name(products_df)
+    unit_conv_df = _build_unit_conversions(raw, mapping, tracker, warnings, notes, key_by_name)
 
     entity_dfs: dict[Entity, pd.DataFrame] = {
         "products": products_df,
@@ -720,7 +752,7 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
     for pl in parsed_lines:
         pid = pl["product_id"]
         pname = pl["product_name"]
-        pl["product_key"] = pid if pid is not None else normalize_label(pname)
+        pl["product_key"] = _line_product_key(pid, pname, key_by_name)
         oid_key = pl["order_id"] or ""
         line_seq_counter[oid_key] += 1
         if pl["line_no"] is None:

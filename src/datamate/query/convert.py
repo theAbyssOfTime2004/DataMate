@@ -5,7 +5,7 @@ import unicodedata
 
 from pydantic import ValidationError
 
-from datamate.query.grounding import QuestionText
+from datamate.query.grounding import PRODUCT_CUES, QuestionText
 from datamate.query.parse_schema import (
     COMPARE_KINDS,
     FILTER_KEYS,
@@ -457,6 +457,21 @@ def _ground_filters(text: QuestionText | None, raw: object, label: str) -> objec
                     "value matches the question's condition, set in_scope false"
                 )
         kept[field] = chosen
+    products = raw.get("product")
+    if isinstance(products, list):
+        chosen_products: list[object] = []
+        for value in products:
+            if not isinstance(value, str) or text.mentions_product(value):
+                chosen_products.append(value)
+                continue
+            hits, _total = text.product_word_hits(value)
+            if hits or any(text.has_phrase(cue) for cue in PRODUCT_CUES):
+                raise ConvertError(
+                    f"{label}.product {value!r} is not what the question names. Use a "
+                    "category for a product group; if nothing listed matches, set "
+                    "in_scope false"
+                )
+        kept["product"] = chosen_products
     shift = raw.get("shift")
     if isinstance(shift, str) and not text.mentions_shift(shift):
         raise ConvertError(f"{label}.shift {shift!r} is not mentioned in the question")
