@@ -121,6 +121,12 @@ def to_query_spec(
     ):
         # "doanh thu tiền mặt và doanh thu COD": two filtered values written as a pair.
         kind, multi_filters, filters_b = "multi", [raw_filters, filters_b], None
+    if kind == "multi" and filters_b is not None and _has_items(multi_filters):
+        # The entries are in multi_filters; filters_b only restates one of them (or is empty).
+        listed = [_filters(item, "multi_filters") for item in multi_filters]
+        restated = _filters(filters_b, "filters_b")
+        if restated == Filters() or restated in listed:
+            filters_b = None
     if kind == "argmax" and text is not None:
         # Trend wording on a "which day" question adds nothing; the words decide the rest.
         direction = None

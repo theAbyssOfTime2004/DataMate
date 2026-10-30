@@ -103,7 +103,7 @@ class QuestionText:
 
     def mentions_shift(self, shift: str) -> bool:
         word = _SHIFT_WORDS.get(shift)
-        return word is not None and word in self.tokens
+        return word is not None and self.has_word(word)
 
     def mentions_year(self) -> bool:
         """năm / yoy: a same-period-last-year baseline or a year-to-date period."""

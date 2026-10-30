@@ -347,6 +347,25 @@ def test_convert_settles_stray_fields_and_common_shape_slips() -> None:
         )
     )
     assert isinstance(pair, MultiQuery)
+    phone, store = _filters(channel=["phone"]), _filters(channel=["store"])
+    restated = _convert(
+        _parsed(kind="multi", filters=phone, filters_b=store, multi_filters=[phone, store])
+    )
+    assert [query.filters.channel for query in restated.queries] == [["phone"], ["store"]]
+    with pytest.raises(ConvertError, match="only valid for compare"):
+        other = _filters(channel=["zalo_oa"])
+        _convert(_parsed(kind="multi", filters_b=other, multi_filters=[phone, store]))
+    typo = _grounded(
+        _parsed(
+            kind="compare",
+            periods=[{"kind": "week_last"}],
+            op="pct_change",
+            filters=_filters(shift="afternoon"),
+            filters_b=_filters(shift="morning"),
+        ),
+        "ee tuần rồi dthu ca chiều chênh ca sangs nhiêu %",
+    )
+    assert typo.b.filters.shift == "morning"
     with pytest.raises(ConvertError, match="name a filter"):
         _convert(_parsed(kind="multi", multi_filters=[_filters(), _filters()]))
     with pytest.raises(ConvertError, match="differ"):
