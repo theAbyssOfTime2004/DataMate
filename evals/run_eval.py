@@ -58,6 +58,32 @@ def _git_commit_hash() -> str | None:
         return None
 
 
+def _git_dirty() -> bool | None:
+    """True if the worktree has changes outside runs/ and cache/; None if git is unavailable."""
+    try:
+        res = subprocess.run(
+            [
+                "git",
+                "status",
+                "--porcelain",
+                "--",
+                ".",
+                ":(exclude)runs",
+                ":(exclude)runs/**",
+                ":(exclude)cache",
+                ":(exclude)cache/**",
+            ],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+        return bool(res.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def _settings_without_api_key() -> dict[str, Any]:
     raw = settings.model_dump(mode="json")
     raw.pop("llm_api_key", None)
@@ -257,6 +283,7 @@ def run_evaluation(
 
     metadata = {
         "git_commit": _git_commit_hash(),
+        "git_dirty": _git_dirty(),
         "system": system.name,
         "split": split,
         "subset": subset,

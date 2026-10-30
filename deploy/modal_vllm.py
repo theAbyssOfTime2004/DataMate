@@ -51,7 +51,16 @@ image = (
     modal.Image.from_registry("nvidia/cuda:12.8.1-devel-ubuntu22.04", add_python="3.12")
     .entrypoint([])
     .uv_pip_install(f"vllm=={VLLM_VERSION}", "huggingface_hub[hf_transfer]")
-    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
+    .env(
+        {
+            "HF_HUB_ENABLE_HF_TRANSFER": "1",
+            # Read locally at deploy time. The container re-imports this module without the
+            # local env, so it must find the same values here or it falls back to the 4B.
+            "DATAMATE_MODEL": MODEL,
+            "DATAMATE_SERVED_NAME": SERVED_NAME,
+            "DATAMATE_MAX_LEN": str(MAX_MODEL_LEN),
+        }
+    )
 )
 hf_cache = modal.Volume.from_name("datamate-hf-cache", create_if_missing=True)
 vllm_cache = modal.Volume.from_name("datamate-vllm-cache", create_if_missing=True)
