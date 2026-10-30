@@ -17,7 +17,8 @@ from datamate.io.raw import _compute_business_cache_key, load_business_cached
 from datamate.mapping.fields import FIELD_TYPES, SIMPLE_ENTITIES
 from datamate.mapping.model import Mapping, mapping_fingerprint
 
-ETL_VERSION = "1.5"  # 1.5: extended canonical schema (simple tables + amount_paid/due/phone)
+# Bump on any change to ETL output shape/semantics (even if mapping fingerprint is unchanged).
+ETL_VERSION = "1.6"  # 1.6: always dedupe purchases by receipt_id; sum differing totals
 
 _TYPE_FROM_FIELD: dict[str, str] = {
     "date": "DATE",

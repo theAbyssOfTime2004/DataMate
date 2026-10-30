@@ -1603,6 +1603,143 @@ def test_e1c_pay_date_pay_ts_same_column_drops_ts_keeps_orders(tmp_path: Path) -
     assert any("dropped pay_ts" in i.message for i in res.issues)
 
 
+def test_e1d_surviving_simple_error_drops_entity_not_mapping_failed(tmp_path: Path) -> None:
+    """A fake simple-entity error that survives field drops -> drop entity; orders OK."""
+    from datamate.mapping.validate import Issue
+
+    (tmp_path / "README.md").write_text(
+        "# Shop\n\n## Quy ước\n- Dữ liệu có đến hết 31/03/2025.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "ban.csv").write_text(
+        "Mã đơn,Ngày,Khách,Trạng thái,Tên món,SL,Thành tiền\n"
+        "ORD01,15/03/2025,An,xong,Cà phê,1,10000\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "thu.csv").write_text(
+        "Ngày thu,Số tiền\n12/03/2025,50000\n",
+        encoding="utf-8",
+    )
+    raw = read_business(tmp_path)
+    profile = profile_business(raw)
+    ban = next(t.name for t in profile.tables if t.name.startswith("ban.csv"))
+    thu = next(t.name for t in profile.tables if t.name.startswith("thu.csv"))
+    from datamate.mapping.fields import FIELD_DOCS
+
+    line_fields = {
+        "order_id": "Mã đơn",
+        "line_no": None,
+        "product_id": None,
+        "product_name": "Tên món",
+        "qty": "SL",
+        "unit": None,
+        "qty_base": None,
+        "unit_price": None,
+        "line_discount": None,
+        "line_amount": "Thành tiền",
+        "cost_per_unit": None,
+    }
+    ord_fields = {
+        "order_id": "Mã đơn",
+        "order_date": "Ngày",
+        "order_ts": None,
+        "status": "Trạng thái",
+        "customer_id": None,
+        "customer_name": "Khách",
+        "payment_method": None,
+        "channel": None,
+        "employee_id": None,
+        "order_subtotal": None,
+        "order_discount": None,
+        "shipping_fee": None,
+        "order_payable": None,
+    }
+    pay_cols = {k: None for k in FIELD_DOCS["payments"]}
+    pay_cols["pay_date"] = "Ngày thu"
+    pay_cols["amount"] = "Số tiền"
+    fake = FakeClient(
+        {
+            "step_a_table_roles": [
+                {
+                    "tables": [
+                        {"table": ban, "entity": "order_lines"},
+                        {"table": thu, "entity": "payments"},
+                    ],
+                    "orders_source": "order_lines",
+                }
+            ],
+            "step_b_order_lines": [line_fields],
+            "step_b_orders": [ord_fields],
+            "step_c_status_map": [{"xong": "completed"}],
+            "step_d_customers_returns": [
+                {"walk_in_values": [], "return_rule": "status"}
+            ],
+            "step_b_payments": [pay_cols],
+        }
+    )
+
+    import datamate.mapping.infer as infer_mod
+
+    real_validate = infer_mod.validate_mapping
+    call_n = {"n": 0}
+
+    def _validate_inject(raw_arg, mapping_arg):
+        issues, canon = real_validate(raw_arg, mapping_arg)
+        call_n["n"] += 1
+        # After simple entities are assembled, inject a non-droppable payments error.
+        if mapping_arg.tables.get("payments") is not None:
+            issues = [
+                *issues,
+                Issue(
+                    step="B_payments",
+                    severity="error",
+                    message="synthetic payments integrity failure",
+                ),
+            ]
+        return issues, canon
+
+    infer_mod.validate_mapping = _validate_inject  # type: ignore[assignment]
+    try:
+        res = infer_mapping(raw, profile, fake)
+    finally:
+        infer_mod.validate_mapping = real_validate  # type: ignore[assignment]
+
+    assert res.mapping is not None
+    assert "orders" in res.mapping.tables
+    assert "payments" not in res.mapping.tables
+    assert res.errors == []
+    assert not any(i.severity == "error" for i in res.issues)
+    assert any(
+        "dropped entity payments: synthetic payments integrity failure" in i.message
+        for i in res.issues
+    )
+
+    from datamate.systems.pipeline import llm_mapping_provider
+
+    # Fresh client: provider accepts a clean mapping (no error-severity issues).
+    fake2 = FakeClient(
+        {
+            "step_a_table_roles": [
+                {
+                    "tables": [
+                        {"table": ban, "entity": "order_lines"},
+                        {"table": thu, "entity": "payments"},
+                    ],
+                    "orders_source": "order_lines",
+                }
+            ],
+            "step_b_order_lines": [line_fields],
+            "step_b_orders": [ord_fields],
+            "step_c_status_map": [{"xong": "completed"}],
+            "step_d_customers_returns": [
+                {"walk_in_values": [], "return_rule": "status"}
+            ],
+            "step_b_payments": [pay_cols],
+        }
+    )
+    assert llm_mapping_provider("train", "x", raw, profile, fake2) is not None
+
+
 def test_e1c_two_expenses_tables_skipped_no_step_a_repair(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text(
         "# Shop\n\n## Quy ước\n- Dữ liệu có đến hết 31/03/2025.\n",
@@ -1681,3 +1818,196 @@ def test_e1c_two_expenses_tables_skipped_no_step_a_repair(tmp_path: Path) -> Non
     a_calls = [c for c in fake.calls if c["schema_name"] == "step_a_table_roles"]
     assert len(a_calls) == 1  # no repair
     assert any("skipped expenses" in i.message for i in res.issues)
+
+
+def test_e1d_fix_purchases_only_flat_also_maps_purchase_lines(tmp_path: Path) -> None:
+    """After purchases B, repeating receipt_id promotes the same table to purchase_lines."""
+    (tmp_path / "README.md").write_text(
+        "# Shop\n\n## Quy ước\n- Dữ liệu có đến hết 31/03/2025.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "ban.csv").write_text(
+        "Mã đơn,Ngày,Khách,Trạng thái,Tên món,SL,Thành tiền\n"
+        "ORD01,15/03/2025,An,xong,Cà phê,1,10000\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "nhap.csv").write_text(
+        "Phiếu,Ngày nhập,NCC,Tên hàng,SL,Thành tiền\n"
+        "PN01,10/03/2025,Dược HN,Paracetamol,10,80000\n"
+        "PN01,10/03/2025,Dược HN,Vitamin C,5,20000\n"
+        "PN02,11/03/2025,Dược HN,Paracetamol,3,24000\n",
+        encoding="utf-8",
+    )
+    raw = read_business(tmp_path)
+    profile = profile_business(raw)
+    ban = next(t.name for t in profile.tables if t.name.startswith("ban.csv"))
+    nhap = next(t.name for t in profile.tables if t.name.startswith("nhap.csv"))
+    from datamate.mapping.fields import FIELD_DOCS
+
+    def _null_fields(entity: str, overrides: dict[str, str | None]) -> dict[str, str | None]:
+        return {k: overrides.get(k) for k in FIELD_DOCS[entity]}  # type: ignore[index]
+
+    line_fields = {
+        "order_id": "Mã đơn",
+        "line_no": None,
+        "product_id": None,
+        "product_name": "Tên món",
+        "qty": "SL",
+        "unit": None,
+        "qty_base": None,
+        "unit_price": None,
+        "line_discount": None,
+        "line_amount": "Thành tiền",
+        "cost_per_unit": None,
+    }
+    ord_fields = {
+        "order_id": "Mã đơn",
+        "order_date": "Ngày",
+        "order_ts": None,
+        "status": "Trạng thái",
+        "customer_id": None,
+        "customer_name": "Khách",
+        "payment_method": None,
+        "channel": None,
+        "employee_id": None,
+        "order_subtotal": None,
+        "order_discount": None,
+        "shipping_fee": None,
+        "order_payable": None,
+    }
+    purchase_cols = {
+        "receipt_id": "Phiếu",
+        "receipt_date": "Ngày nhập",
+        "supplier_name": "NCC",
+        "total_amount": "Thành tiền",
+    }
+    pline_cols = {
+        "receipt_id": "Phiếu",
+        "receipt_date": "Ngày nhập",
+        "supplier_name": "NCC",
+        "product_name": "Tên hàng",
+        "qty": "SL",
+        "line_amount": "Thành tiền",
+    }
+    fake = FakeClient(
+        {
+            "step_a_table_roles": [
+                {
+                    "tables": [
+                        {"table": ban, "entity": "order_lines"},
+                        {"table": nhap, "entity": "purchases"},
+                    ],
+                    "orders_source": "order_lines",
+                }
+            ],
+            "step_b_order_lines": [line_fields],
+            "step_b_orders": [ord_fields],
+            "step_c_status_map": [{"xong": "completed"}],
+            "step_d_customers_returns": [
+                {"walk_in_values": [], "return_rule": "status"}
+            ],
+            "step_b_purchases": [_null_fields("purchases", purchase_cols)],
+            "step_b_purchase_lines": [_null_fields("purchase_lines", pline_cols)],
+        }
+    )
+    res = infer_mapping(raw, profile, fake)
+    assert res.mapping is not None
+    assert "purchases" in res.mapping.tables
+    assert "purchase_lines" in res.mapping.tables
+    assert (
+        res.mapping.tables["purchases"].sources[0].file
+        == res.mapping.tables["purchase_lines"].sources[0].file
+    )
+    assert res.canonical is not None
+    assert len(res.canonical.purchase_lines) == 3
+    assert len(res.canonical.purchases) == 2
+
+
+def test_e1d_fix_debts_due_date_only_kept(tmp_path: Path) -> None:
+    """Debts table with order id + credit days + due date keeps order_id and due_date."""
+    (tmp_path / "README.md").write_text(
+        "# Shop\n\n## Quy ước\n- Dữ liệu có đến hết 31/03/2025.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "ban.csv").write_text(
+        "Mã đơn,Ngày,Khách,Trạng thái,Tên món,SL,Thành tiền\n"
+        "ORD01,15/03/2025,An,xong,Cà phê,1,10000\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "no.csv").write_text(
+        "Mã đơn,Số ngày nợ,Hạn trả\n"
+        "ORD01,30,14/04/2025\n",
+        encoding="utf-8",
+    )
+    raw = read_business(tmp_path)
+    profile = profile_business(raw)
+    ban = next(t.name for t in profile.tables if t.name.startswith("ban.csv"))
+    no = next(t.name for t in profile.tables if t.name.startswith("no.csv"))
+    from datamate.mapping.fields import FIELD_DOCS
+
+    def _null_fields(entity: str, overrides: dict[str, str | None]) -> dict[str, str | None]:
+        return {k: overrides.get(k) for k in FIELD_DOCS[entity]}  # type: ignore[index]
+
+    line_fields = {
+        "order_id": "Mã đơn",
+        "line_no": None,
+        "product_id": None,
+        "product_name": "Tên món",
+        "qty": "SL",
+        "unit": None,
+        "qty_base": None,
+        "unit_price": None,
+        "line_discount": None,
+        "line_amount": "Thành tiền",
+        "cost_per_unit": None,
+    }
+    ord_fields = {
+        "order_id": "Mã đơn",
+        "order_date": "Ngày",
+        "order_ts": None,
+        "status": "Trạng thái",
+        "customer_id": None,
+        "customer_name": "Khách",
+        "payment_method": None,
+        "channel": None,
+        "employee_id": None,
+        "order_subtotal": None,
+        "order_discount": None,
+        "shipping_fee": None,
+        "order_payable": None,
+    }
+    debt_cols = {
+        "order_id": "Mã đơn",
+        "due_date": "Hạn trả",
+        # credit-days column must NOT be mapped as amount_remaining
+    }
+    fake = FakeClient(
+        {
+            "step_a_table_roles": [
+                {
+                    "tables": [
+                        {"table": ban, "entity": "order_lines"},
+                        {"table": no, "entity": "debts"},
+                    ],
+                    "orders_source": "order_lines",
+                }
+            ],
+            "step_b_order_lines": [line_fields],
+            "step_b_orders": [ord_fields],
+            "step_c_status_map": [{"xong": "completed"}],
+            "step_d_customers_returns": [
+                {"walk_in_values": [], "return_rule": "status"}
+            ],
+            "step_b_debts": [_null_fields("debts", debt_cols)],
+        }
+    )
+    res = infer_mapping(raw, profile, fake)
+    assert res.mapping is not None
+    assert "debts" in res.mapping.tables
+    cols = res.mapping.tables["debts"].columns
+    assert cols.get("order_id") == "Mã đơn"
+    assert cols.get("due_date") == "Hạn trả"
+    assert "amount_remaining" not in cols
+    assert res.canonical is not None
+    assert len(res.canonical.debts) == 1
+    assert res.canonical.debts.iloc[0]["due_date"] is not None

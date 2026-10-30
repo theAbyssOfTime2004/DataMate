@@ -98,6 +98,60 @@ def test_one_wrong_column_and_one_wrong_status() -> None:
     assert ms.data_end_ok is True
 
 
+def test_order_path_unchanged_by_extra_simple_entity() -> None:
+    gold = Mapping.model_validate(_minimal_mapping_dict())
+    pred_raw = _minimal_mapping_dict()
+    pred_raw["tables"]["payments"] = {
+        "sources": [{"file": "thu.csv", "sheet": None, "header_row": 1}],
+        "columns": {"pay_date": "Ngày", "amount": "Tiền"},
+    }
+    pred = Mapping.model_validate(pred_raw)
+    ms = score(pred, gold)
+    assert ms.order_path is not None and ms.new_entities is not None
+    # POC-comparable totals ignore the extra payments table.
+    assert ms.n_correct == ms.order_path.n_correct
+    assert ms.field_accuracy == ms.order_path.field_accuracy
+    assert ms.n_wrong == 0 and ms.n_missing == 0
+    assert any(v.key.startswith("payments.") for v in ms.new_entities.extra_columns)
+
+
+def test_wrong_simple_field_lowers_only_new_entities() -> None:
+    raw = _minimal_mapping_dict()
+    raw["tables"]["payments"] = {
+        "sources": [{"file": "thu.csv", "sheet": None, "header_row": 1}],
+        "columns": {"pay_date": "Ngày thu", "amount": "Số tiền"},
+    }
+    gold = Mapping.model_validate(raw)
+    pred = gold.model_copy(deep=True)
+    pred.tables["payments"].columns["amount"] = "Sai cột"
+
+    ms = score(pred, gold)
+    assert ms.order_path is not None and ms.new_entities is not None
+    assert ms.n_wrong == 0  # order_path clean
+    assert ms.field_accuracy == 1.0
+    assert ms.new_entities.n_wrong == 1
+    assert ms.new_entities.field_accuracy < 1.0
+    wrong = [v for v in ms.new_entities.columns if v.verdict == "wrong"]
+    assert wrong[0].key == "payments.amount"
+
+
+def test_wrong_simple_entity_source_file_in_new_entity_table_notes() -> None:
+    raw = _minimal_mapping_dict()
+    raw["tables"]["payments"] = {
+        "sources": [{"file": "thu.csv", "sheet": None, "header_row": 1}],
+        "columns": {"pay_date": "Ngày thu", "amount": "Số tiền"},
+    }
+    gold = Mapping.model_validate(raw)
+    pred = gold.model_copy(deep=True)
+    pred.tables["payments"].sources[0].file = "sai.csv"
+
+    ms = score(pred, gold)
+    assert ms.order_path is not None and ms.new_entities is not None
+    assert ms.tables_ok is True  # order-path tables unchanged
+    assert ms.table_notes == []
+    assert any("payments: files" in n for n in ms.new_entities.table_notes)
+
+
 def test_readme_source_is_not_a_table_miss_and_empty_walk_in_matches() -> None:
     raw = _minimal_mapping_dict()
     raw["tables"]["unit_conversions"] = {"source": "readme", "columns": {}}

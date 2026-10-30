@@ -1,5 +1,6 @@
 business_id: biz_101
 status: verified          # 2026-10-27, user reviewed
+simple_status: draft      # E1d: no simple entities in raw data; user should confirm
 format_family: csv_flat               # CSV phẳng, mỗi dòng một dòng hàng
 data_end_date: 2026-08-24             # README
 customer_identity: by_name            # không có mã khách
@@ -45,3 +46,5 @@ notes:
   - "ĐÃ KIỂM: Ngày tháng chỉ có một dạng 'd thg m yyyy' trên cả 56.501 dòng."
   - "ĐÃ KIỂM: không có dòng nào lặp y hệt."
   - "ĐÃ KIỂM doanh thu (đơn Xong + Đang giao, cộng Thanh tien, theo Ngày tháng): tháng 1, 3, 7/2026 khớp đáp án 3/3."
+  # E1d simple entities: shop chỉ có ban_hang.csv → không có payments/purchases/stock/...
+  - "E1d: không có bảng phụ (nhập/tồn/thu/chi/NV); amount_paid/amount_due/phone cũng không có cột."

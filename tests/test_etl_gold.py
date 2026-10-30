@@ -9,6 +9,7 @@ import pytest
 from datamate.config import PROJECT_ROOT, settings
 from datamate.etl import EtlReport, load_or_build_canonical
 from datamate.mapping import Mapping, load_mapping_yaml
+from datamate.mapping.fields import SIMPLE_ENTITIES
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -81,7 +82,15 @@ def test_gold_dedupe_counts(
     expected_dedupe: int,
 ) -> None:
     _, report, _ = gold_builds[biz_id]
-    assert sum(report.dedupe_counts.values()) == expected_dedupe
+    # Order-path exact-row dedupe keys are raw table names (may contain ".xlsx");
+    # simple-entity counters use "{entity}.{reason}" (e.g. purchases.flat_dedupe).
+    simple_prefixes = tuple(f"{ent}." for ent in SIMPLE_ENTITIES)
+    order_dedupe = sum(
+        v
+        for k, v in report.dedupe_counts.items()
+        if not k.startswith(simple_prefixes)
+    )
+    assert order_dedupe == expected_dedupe
 
 
 @pytest.mark.parametrize("biz_id", ["biz_106", "biz_123"])

@@ -8,7 +8,12 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel
 
 from datamate.io.raw import BusinessRaw
-from datamate.mapping.fields import REQUIRED_FIELDS, SIMPLE_ENTITIES, SIMPLE_REQUIRED
+from datamate.mapping.fields import (
+    REQUIRED_FIELDS,
+    SIMPLE_AT_LEAST_ONE,
+    SIMPLE_ENTITIES,
+    SIMPLE_REQUIRED,
+)
 from datamate.mapping.model import Entity, Mapping, mapping_fingerprint
 
 if TYPE_CHECKING:
@@ -453,7 +458,7 @@ def _validate_simple_entities(
                     )
                 )
 
-        # Required fields must still be present (drug_info: at least one of two).
+        # Required fields must still be present (debts / drug_info: at least one of two).
         mapped = set(tm.columns)
         req = SIMPLE_REQUIRED.get(ent, set())
         missing_req = sorted(req - mapped)
@@ -466,17 +471,16 @@ def _validate_simple_entities(
                     message=f"Entity {ent!r} missing required field(s) {missing_req}",
                 )
             )
-        if ent == "drug_info" and not (
-            mapped & {"active_ingredient", "is_prescription"}
-        ):
+        at_least = SIMPLE_AT_LEAST_ONE.get(ent)
+        if at_least is not None and not (mapped & at_least):
+            first = min(at_least)
+            joined = " or ".join(sorted(at_least))
             issues.append(
                 Issue(
-                    step="B_drug_info",
+                    step=f"B_{ent}",
                     severity="warning",
-                    drop_field="drug_info.active_ingredient",
-                    message=(
-                        "drug_info needs active_ingredient or is_prescription; dropping entity"
-                    ),
+                    drop_field=f"{ent}.{first}",
+                    message=f"{ent} needs {joined}; dropping entity",
                 )
             )
 

@@ -1,5 +1,6 @@
 business_id: biz_106
 status: verified          # 2026-10-27, user reviewed
+simple_status: draft      # E1d new entities below; user must verify before using as gold
 format_family: pos_export_danhsach    # Excel xuất từ máy POS / phần mềm, kiểu DanhSach*
 data_end_date: 2026-09-14             # README
 customer_identity: by_code            # có Mã KH
@@ -30,6 +31,8 @@ tables:
       order_subtotal: "Tổng tiền hàng"
       order_discount: "Giảm giá"
       order_payable: "Tổng sau giảm giá"
+      amount_paid: "Khách đã trả"     # E1d later field; tách với Tổng sau giảm giá
+      # TODO kiểm: không có cột còn nợ riêng → amount_due bỏ trống
 
   order_lines:
     sources:
@@ -73,6 +76,52 @@ tables:
     columns:
       customer_id: "Mã khách hàng"
       customer_name: "Tên khách hàng"  # có lúc kèm số điện thoại: "Đào Dương Giang - 0912 365 003"
+      phone: "Điện thoại"             # E1d later field
+
+  # --- E1d simple entities (draft) ---
+  payments:
+    sources:
+      - {file: SoQuy.xlsx, sheet: Sheet1, header_row: 1}
+    columns:
+      payment_id: "Mã phiếu"
+      order_id: "Mã hóa đơn"
+      # date+ts trên cùng cột bị validator từ chối → chỉ map pay_date
+      pay_date: "Thời gian"           # required; cột timestamp
+      amount: "Giá trị"
+      method: "Phương thức thanh toán"
+
+  purchases:
+    sources:
+      - {file: DanhSachNhapHang.xlsx, sheet: Sheet1, header_row: 1}
+    columns:
+      receipt_id: "Mã nhập hàng"
+      receipt_date: "Thời gian"
+      supplier_id: "Mã NCC"
+      total_amount: "Cần trả NCC"
+      status_raw: "Trạng thái"
+
+  purchase_lines:
+    sources:
+      - {file: DanhSachChiTietNhapHang.xlsx, sheet: Sheet1, header_row: 1}
+    columns:
+      receipt_id: "Mã nhập hàng"
+      line_no: "STT"
+      product_id: "Mã hàng"
+      unit: "ĐVT"
+      qty: "Số lượng"
+      unit_cost: "Đơn giá"
+
+  stock_snapshot:
+    sources:
+      - {file: BaoCaoTonKho.xlsx, sheet: Sheet1, header_row: 1}
+    columns:
+      product_id: "Mã hàng"
+      product_name: "Tên hàng"
+      unit: "ĐVT"
+      qty_on_hand: "Tồn cuối kỳ"
+
+purchase_status_map:                  # E1d; ĐÃ KIỂM header: mọi phiếu "Đã nhập hàng"
+  "Đã nhập hàng": valid
 
 notes:
   - "README gần như không có từ điển cột: đây là ca khó cho bước LLM gán cột."
@@ -80,3 +129,4 @@ notes:
   - "ĐÃ KIỂM: sau khi bỏ dòng trùng, tổng Thành tiền các dòng = Tổng tiền hàng của đơn ở 100% đơn. Đây là phép kiểm tra mapping (và phát hiện dòng trùng) rất tốt."
   - "ĐÃ KIỂM doanh thu tháng 2/2025: khớp đáp án."
   - "SoQuy.xlsx (phiếu thu), DanhSachNhapHang / DanhSachChiTietNhapHang (nhập hàng), BaoCaoTonKho (tồn): chưa cần cho POC."
+  - "E1d: không có debts/expenses/employees/lots/sale_lots/price_history/deliveries/drug_info/suppliers master."

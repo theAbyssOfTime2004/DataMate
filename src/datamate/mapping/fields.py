@@ -104,10 +104,13 @@ FIELD_DOCS: dict[Entity, dict[str, str]] = {
         "customer_id": "customer code who owes",
         "customer_name": "customer name who owes (khách nợ)",
         "order_date": "order date associated with the debt",
-        "due_date": "due date for payment (hạn trả)",
+        "due_date": "date the debt must be paid (hạn trả)",
         "amount_total": "original debt / order total",
         "amount_paid": "amount already paid toward the debt",
-        "amount_remaining": "remaining unpaid amount (còn nợ / dư nợ)",
+        "amount_remaining": (
+            "money still owed; never a date or a number of days "
+            "(còn nợ / dư nợ)"
+        ),
         "as_of_date": "snapshot date of the debt balance",
     },
     "purchases": {
@@ -390,10 +393,12 @@ FIELD_TYPES: dict[Entity, dict[str, FieldType]] = {
     },
 }
 
-# Bold fields from docs/cursor/e1.md. drug_info needs at least one of two (checked in E1c).
+# Bold fields from docs/cursor/e1.md.
+# drug_info: at least one of active_ingredient / is_prescription (infer + validate + ETL).
+# debts: at least one of amount_remaining / due_date (same pattern).
 SIMPLE_REQUIRED: dict[Entity, set[str]] = {
     "payments": {"pay_date", "amount"},
-    "debts": {"amount_remaining"},
+    "debts": set(),
     "purchases": {"receipt_id", "receipt_date"},
     "purchase_lines": {"qty"},
     "suppliers": {"supplier_name"},
@@ -406,6 +411,12 @@ SIMPLE_REQUIRED: dict[Entity, set[str]] = {
     "employees": {"employee_name"},
     "deliveries": {"order_id", "delivery_date"},
     "drug_info": set(),
+}
+
+# Entities whose required set is empty but need at least one of these fields.
+SIMPLE_AT_LEAST_ONE: dict[Entity, frozenset[str]] = {
+    "debts": frozenset({"amount_remaining", "due_date"}),
+    "drug_info": frozenset({"active_ingredient", "is_prescription"}),
 }
 
 # Order and customer fields added with the extended schema. Step B does not offer them:

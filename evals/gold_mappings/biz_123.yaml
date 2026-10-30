@@ -1,5 +1,6 @@
 business_id: biz_123
 status: verified          # 2026-10-27, user reviewed
+simple_status: draft      # E1d new entities below; user must verify before using as gold
 format_family: pos_sqlite             # SQLite máy POS, nhà thuốc
 data_end_date: 2026-06-28             # README
 customer_identity: by_code
@@ -29,6 +30,8 @@ tables:
       order_discount: "ChietKhau"     # khuyến mãi cả đơn (KM01), không trừ khi tính doanh thu
       shipping_fee: "PhiVanChuyen"
       order_payable: "TongThanhToan"
+      amount_paid: "KhachDaTra"       # E1d later field
+      amount_due: "ConPhaiThu"        # E1d later field
 
   order_lines:
     sources:
@@ -72,6 +75,108 @@ tables:
       customer_id: "MaKhachHang"
       customer_name: "TenGoi"
       segment: "LoaiKhachHang"
+      phone: "SoDienThoai"            # E1d later field
+
+  # --- E1d simple entities (draft); sqlite sheet = table name ---
+  payments:
+    sources:
+      - {file: pos.sqlite, sheet: thanh_toan, header_row: 1}
+    columns:
+      payment_id: "MaPhieuThu"
+      order_id: "MaHoaDon"
+      # date+ts trên cùng cột bị validator từ chối → chỉ map pay_date
+      pay_date: "NgayGioThu"          # required; cột timestamp
+      amount: "SoTienThu"
+      method: "PhuongThuc"
+      note: "DienGiai"
+
+  purchases:
+    sources:
+      - {file: pos.sqlite, sheet: phieu_nhap, header_row: 1}
+    columns:
+      receipt_id: "MaPhieuNhap"
+      receipt_date: "NgayNhapKho"
+      supplier_id: "MaNhaCungCap"
+      status_raw: "TinhTrang"
+      total_amount: "TongGiaTriNhap"
+
+  purchase_lines:
+    sources:
+      - {file: pos.sqlite, sheet: chi_tiet_nhap, header_row: 1}
+    columns:
+      receipt_id: "MaPhieuNhap"
+      line_no: "SoThuTu"
+      product_id: "MaHangHoa"
+      unit: "DonViTinh"
+      qty: "SL"
+      unit_cost: "DonGiaNhap"
+      lot_id: "MaLo"
+      expiry_date: "HanSuDung"
+
+  suppliers:
+    sources:
+      - {file: pos.sqlite, sheet: nha_cung_cap, header_row: 1}
+    columns:
+      supplier_id: "MaNhaCungCap"
+      supplier_name: "TenGoi"
+
+  stock_moves:
+    sources:
+      - {file: pos.sqlite, sheet: the_kho, header_row: 1}
+    columns:
+      product_id: "MaHangHoa"
+      move_date: "NgayGioPhatSinh"    # required; timestamp column also carries the date
+      balance: "TonCuoi"
+      ref_id: "MaChungTu"
+      kind_raw: "LoaiGiaoDich"
+      # TODO kiểm: không map move_ts cùng cột (trùng raw col); không có qty_in/qty_out riêng
+
+  lots:
+    sources:
+      - {file: pos.sqlite, sheet: lo_hang, header_row: 1}
+    columns:
+      lot_id: "MaLo"
+      product_id: "MaHangHoa"
+      receipt_id: "MaPhieuNhap"
+      expiry_date: "HanSuDung"
+      qty_received: "SLNhapQuyDoi"
+      unit_cost: "DonGiaNhap"
+
+  sale_lots:
+    sources:
+      - {file: pos.sqlite, sheet: chi_tiet_don_lo, header_row: 1}
+    columns:
+      order_id: "MaHoaDon"
+      line_no: "SoThuTu"
+      lot_id: "MaLo"
+      qty: "SLQuyDoi"
+
+  price_history:
+    sources:
+      - {file: pos.sqlite, sheet: lich_su_gia, header_row: 1}
+    columns:
+      product_id: "MaHangHoa"
+      effective_date: "NgayApDung"
+      price: "GiaBanLe"
+
+  employees:
+    sources:
+      - {file: pos.sqlite, sheet: nhan_vien, header_row: 1}
+    columns:
+      employee_id: "MaNhanVien"
+      employee_name: "TenGoi"
+      start_date: "NgayNhanViec"
+
+  drug_info:
+    sources:
+      - {file: pos.sqlite, sheet: thong_tin_thuoc, header_row: 1}
+    columns:
+      product_id: "MaHangHoa"
+      active_ingredient: "ThanhPhanChinh"
+      is_prescription: "BanTheoDon"
+
+purchase_status_map:
+  "received": valid                   # ĐÃ KIỂM: mọi phiếu nhập TinhTrang=received
 
 notes:
   - "QUAN TRỌNG (ĐÃ KIỂM): 1.208 dòng chi_tiet_don lặp y hệt mọi cột trong cùng một đơn (1.196 đơn). Rulebook §8: lỗi xuất file, chỉ tính một lần. Không bỏ trùng: doanh thu tháng 10/2025 = 205.997.400 (SAI). Bỏ trùng: 202.375.900 = đáp án."
@@ -80,3 +185,4 @@ notes:
   - "ThueGTGT luôn 0. Doanh thu = tổng TriGia, không trừ ChietKhau của đơn, không cộng PhiVanChuyen."
   - "Bảng the_kho, lo_hang, chi_tiet_don_lo, thong_tin_thuoc, lich_su_gia, phieu_nhap: chưa cần cho POC."
   - "ĐÃ KIỂM: sau khi bỏ dòng trùng, TongTienHang = tổng TriGia ở 100% đơn; chưa bỏ trùng thì lệch ở đúng 1.196 đơn có dòng trùng."
+  - "E1d: không map stock_snapshot (dùng stock_moves từ the_kho); không có debts/expenses/deliveries."

@@ -20,7 +20,12 @@ from datamate.etl.build import (
 )
 from datamate.etl.schema import TABLE_COLUMNS
 from datamate.io.raw import BusinessRaw
-from datamate.mapping.fields import FIELD_TYPES, SIMPLE_ENTITIES, SIMPLE_REQUIRED
+from datamate.mapping.fields import (
+    FIELD_TYPES,
+    SIMPLE_AT_LEAST_ONE,
+    SIMPLE_ENTITIES,
+    SIMPLE_REQUIRED,
+)
 from datamate.mapping.model import Entity, Mapping, TableMapping
 from datamate.parse import (
     normalize_label,
@@ -210,6 +215,10 @@ def load_simple_entity(
             if required and any(parsed.get(f) is None for f in required):
                 dedupe_counts[f"{entity}.missing_required"] += 1
                 continue
+            at_least = SIMPLE_AT_LEAST_ONE.get(entity)
+            if at_least is not None and all(parsed.get(f) is None for f in at_least):
+                dedupe_counts[f"{entity}.missing_required"] += 1
+                continue
 
             rows.append(parsed)
 
@@ -234,11 +243,12 @@ def _dedupe_purchases_by_receipt(
     df: pd.DataFrame,
     dedupe_counts: Counter[str],
 ) -> pd.DataFrame:
-    """Keep one row per receipt_id, filling each column with the first non-null value."""
+    """One row per receipt_id: first non-null fields; sum total_amount when values differ."""
     if df.empty or "receipt_id" not in df.columns:
         return df
     cols = list(df.columns)
     by_rid: dict[Any, dict[str, Any]] = {}
+    amounts: dict[Any, list[int]] = {}
     order: list[Any] = []
     dropped = 0
     for row in df.to_dict("records"):
@@ -249,15 +259,30 @@ def _dedupe_purchases_by_receipt(
             by_rid[key] = row
             order.append(key)
             continue
+        amt = row.get("total_amount")
         if rid not in by_rid:
             by_rid[rid] = dict(row)
             order.append(rid)
+            amounts[rid] = []
+            if amt is not None:
+                amounts[rid].append(int(amt))
             continue
         dropped += 1
         existing = by_rid[rid]
         for c in cols:
+            if c == "total_amount":
+                continue
             if existing.get(c) is None and row.get(c) is not None:
                 existing[c] = row[c]
+        if amt is not None:
+            amounts[rid].append(int(amt))
+    for rid, vals in amounts.items():
+        if not vals:
+            continue
+        if len(set(vals)) == 1:
+            by_rid[rid]["total_amount"] = vals[0]
+        else:
+            by_rid[rid]["total_amount"] = sum(vals)
     if dropped:
         dedupe_counts["purchases.flat_dedupe"] += dropped
     return _records_to_df([by_rid[k] for k in order], tuple(cols))
@@ -311,8 +336,12 @@ def load_all_simple_tables(
             walk_in_norm_set=walk_in_norm_set,
         )
 
+    # Always collapse repeated receipt_id on purchases (flat sheet or purchases-only).
+    purchases_df = out.get("purchases")
+    if purchases_df is not None and not purchases_df.empty:
+        out["purchases"] = _dedupe_purchases_by_receipt(purchases_df, dedupe_counts)
+
     if _is_flat_purchase_sheet(mapping):
-        out["purchases"] = _dedupe_purchases_by_receipt(out["purchases"], dedupe_counts)
         purchases_tm = mapping.tables["purchases"]
         lines_tm = mapping.tables["purchase_lines"]
         total_col = purchases_tm.columns.get("total_amount")

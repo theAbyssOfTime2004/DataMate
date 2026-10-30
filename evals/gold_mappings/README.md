@@ -14,6 +14,8 @@ Các file YAML ở đây là **bản nháp do Claude viết** từ README và t�
 
 Soát xong một file thì đổi `status: draft` thành `status: verified` và ghi ngày.
 
+Phần bảng mới (E1): `simple_status: draft | verified`. Phần đơn hàng (`status`) đã verified thì **không sửa**. Chỉ đổi `simple_status` sau khi đã soát purchases/payments/stock/... và các later fields (`amount_paid` / `amount_due` / `phone`).
+
 ## Schema chuẩn (bản POC)
 
 Tên trường dùng trong mục `columns` của mỗi bảng:
@@ -45,8 +47,32 @@ Tên trường dùng trong mục `columns` của mỗi bảng:
 | `products` | `product_id`, `product_name`, `base_unit`, `category`, `unit_cost` | danh mục hàng |
 | `unit_conversions` | `product_id` hoặc `product_name`, `unit`, `base_unit`, `factor` | 1 `unit` = `factor` đơn vị cơ bản |
 | `customers` | `customer_id`, `customer_name`, `segment` | danh sách khách |
+| | `phone` | SĐT khách (later field, E1) |
+| `orders` (later) | `amount_paid` | đã trả trên đơn, **chỉ khi** có tổng đơn riêng |
+| | `amount_due` | còn nợ / còn lại trên đơn |
+
+### Schema mở rộng (E1 — bảng đơn giản)
+
+| Thực thể | Trường bắt buộc (giữ bảng) | Ghi chú |
+|---|---|---|
+| `payments` | `pay_date`, `amount` | phiếu thu / thanh toán |
+| `debts` | `amount_remaining` | sổ công nợ |
+| `purchases` | `receipt_id`, `receipt_date` | phiếu nhập; `purchase_status_map` nếu có `status_raw` |
+| `purchase_lines` | `qty` | chi tiết nhập (có thể cùng sheet với purchases) |
+| `suppliers` | `supplier_name` | danh mục NCC |
+| `stock_snapshot` | `qty_on_hand` | tồn kho thời điểm |
+| `stock_moves` | `move_date` | xuất nhập tồn / thẻ kho |
+| `lots` | `lot_id`, `expiry_date` | lô / hạn dùng |
+| `sale_lots` | `order_id`, `lot_id` | lô gắn dòng bán |
+| `price_history` | `effective_date`, `price` | lịch sử giá |
+| `expenses` | `expense_date`, `amount` | chi phí |
+| `employees` | `employee_name` | nhân viên |
+| `deliveries` | `order_id`, `delivery_date` | đợt giao |
+| `drug_info` | ≥1 trong `active_ingredient` / `is_prescription` | hoạt chất / kê đơn |
 
 **4 trạng thái chuẩn:** `completed` (hoàn thành), `cancelled` (huỷ), `returned` (trả hàng), `shipping` (đang giao).
+
+**Trạng thái phiếu nhập:** `valid` | `cancelled` trong `purchase_status_map`.
 
 ## Định dạng file
 

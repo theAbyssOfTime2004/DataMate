@@ -988,6 +988,65 @@ def test_flat_purchase_sheet_dedupes_and_sums_totals(tmp_path: Path) -> None:
     assert canon.report.dedupe_counts["purchases.flat_dedupe"] == 1
 
 
+def test_purchases_only_repeated_receipt_id_dedupes_and_sums(tmp_path: Path) -> None:
+    """ETL-safe: purchases without purchase_lines still collapses repeated receipt_id."""
+    (tmp_path / "ban.csv").write_text(
+        "Ngày,Khách,Món,SL,Tiền,Trạng thái\n"
+        "01/03/2025,An,Cà phê,1,10000,xong\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "nhap.csv").write_text(
+        "Phiếu,Ngày nhập,NCC,Thành tiền\n"
+        "PN01,10/03/2025,Dược HN,80000\n"
+        "PN01,10/03/2025,Dược HN,20000\n"
+        "PN02,11/03/2025,Dược HN,24000\n",
+        encoding="utf-8",
+    )
+    mapping = Mapping.model_validate(
+        {
+            "data_end_date": "2025-03-31",
+            "customer_identity": "by_name",
+            "walk_in_values": [],
+            "return_rule": "status",
+            "status_map": {"xong": "completed"},
+            "tables": {
+                "orders": {
+                    "derived_from": "order_lines",
+                    "columns": {
+                        "order_date": "Ngày",
+                        "customer_name": "Khách",
+                        "status": "Trạng thái",
+                    },
+                },
+                "order_lines": {
+                    "sources": [{"file": "ban.csv", "sheet": None, "header_row": 1}],
+                    "columns": {
+                        "product_name": "Món",
+                        "qty": "SL",
+                        "line_amount": "Tiền",
+                    },
+                },
+                "purchases": {
+                    "sources": [{"file": "nhap.csv", "sheet": None, "header_row": 1}],
+                    "columns": {
+                        "receipt_id": "Phiếu",
+                        "receipt_date": "Ngày nhập",
+                        "supplier_name": "NCC",
+                        "total_amount": "Thành tiền",
+                    },
+                },
+            },
+        }
+    )
+    canon = build_canonical(read_business(tmp_path), mapping)
+    assert "purchase_lines" not in mapping.tables
+    assert len(canon.purchases) == 2
+    by_id = canon.purchases.set_index("receipt_id")
+    assert by_id.loc["PN01", "total_amount"] == 100000
+    assert by_id.loc["PN02", "total_amount"] == 24000
+    assert canon.report.dedupe_counts["purchases.flat_dedupe"] == 1
+
+
 def test_simple_mapping_error_yields_empty_not_shop_failure(tmp_path: Path) -> None:
     (tmp_path / "ban.csv").write_text(
         "Ngày,Khách,Món,SL,Tiền,Trạng thái\n"

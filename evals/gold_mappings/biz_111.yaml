@@ -1,5 +1,6 @@
 business_id: biz_111
 status: verified          # 2026-10-27, user reviewed
+simple_status: draft      # E1d new entities below; user must verify before using as gold
 format_family: csv_relational         # nhiều CSV nối với nhau qua mã
 data_end_date: 2026-08-19             # README
 customer_identity: by_code            # có mã khách (Số KH)
@@ -24,6 +25,8 @@ tables:
       channel: "Bán qua"              # store / zalo_oa / phone
       payment_method: "Phương thức TT"   # cash / transfer / ewallet / cod / debt
       order_payable: "Tổng bill"
+      amount_paid: "Khách trả"        # E1d later field; tách với Tổng bill
+      amount_due: "Còn lại"           # E1d later field
     # không có giờ đặt đơn → order_ts trống
 
   order_lines:
@@ -60,6 +63,19 @@ tables:
       customer_id: "ma_kh"
       customer_name: "Khách lẻ/sỉ"    # tên cột gây nhầm: đây là TÊN khách, có lúc kèm số điện thoại
       segment: "Nhóm"                 # lẻ / thân thiết / sỉ
+      phone: "Phone"                  # E1d later field
+
+  # --- E1d simple entities (draft) ---
+  payments:
+    sources:
+      - {file: thanh_toan.csv, sheet: null, header_row: 1}
+    columns:
+      payment_id: "Mã phiếu thu"
+      order_id: "Số HĐ"
+      # date+ts trên cùng cột bị validator từ chối → chỉ map pay_date
+      pay_date: "Thời gian thu"       # required; cột timestamp
+      amount: "Tiền"
+      method: "Phương thức"
 
 notes:
   - "Bẫy: cột tên khách tên là 'Khách lẻ/sỉ', còn nhóm khách 'lẻ' là một segment, KHÔNG phải khách vãng lai (rulebook §1: đơn không ghi khách mới là vãng lai)."
@@ -67,3 +83,4 @@ notes:
   - "thanh_toan.csv (các lần trả tiền): chưa cần cho POC; cần cho công nợ."
   - "ĐÃ KIỂM doanh thu (đơn completed + shipping, cộng T.Tiền, theo NgayBan): 2/2 tháng khớp đáp án."
   - "ĐÃ KIỂM: không có dòng chi_tiet_don nào lặp y hệt."
+  - "E1d: không có purchases/stock/lots/expenses/employees/drug_info/debts/deliveries."

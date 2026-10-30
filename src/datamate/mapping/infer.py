@@ -15,6 +15,7 @@ from datamate.mapping.fields import (
     FIELD_DOCS,
     LATER_FIELDS,
     REQUIRED_FIELDS,
+    SIMPLE_AT_LEAST_ONE,
     SIMPLE_ENTITIES,
     SIMPLE_REQUIRED,
 )
@@ -386,10 +387,10 @@ def _build_step_b_variants(
         f"- `{fname}` ({'REQUIRED' if fname in req else 'optional'}): {desc}"
         for fname, desc in fdocs.items()
     ]
-    if entity == "drug_info":
-        field_lines.append(
-            "- At least one of `active_ingredient` / `is_prescription` is required."
-        )
+    at_least = SIMPLE_AT_LEAST_ONE.get(entity)
+    if at_least is not None:
+        joined = " / ".join(f"`{f}`" for f in sorted(at_least))
+        field_lines.append(f"- At least one of {joined} is required.")
     fields_block = "\n".join(field_lines)
     readme_sec = _readme_for_table(readme_text, tp.source_files)
 
@@ -686,11 +687,29 @@ def _build_later_fields_variants(
 def _simple_missing_required(entity: Entity, cleaned: dict[str, str]) -> list[str]:
     required = SIMPLE_REQUIRED.get(entity, set())
     missing = sorted(required - set(cleaned))
-    if entity == "drug_info":
-        if not ({"active_ingredient", "is_prescription"} & set(cleaned)):
-            return ["active_ingredient|is_prescription"]
+    at_least = SIMPLE_AT_LEAST_ONE.get(entity)
+    if at_least is not None:
+        if not (at_least & set(cleaned)):
+            return ["|".join(sorted(at_least))]
         return []
     return missing
+
+
+def _receipt_id_repeats(rt: RawTable, receipt_col: str) -> bool:
+    """True when the mapped receipt_id column has more non-null rows than distinct ids."""
+    if receipt_col not in rt.df.columns:
+        return False
+    seen: set[str] = set()
+    n_nonempty = 0
+    for raw_val in rt.df[receipt_col].tolist():
+        if raw_val is None:
+            continue
+        text = raw_val.strip() if isinstance(raw_val, str) else str(raw_val).strip()
+        if not text:
+            continue
+        n_nonempty += 1
+        seen.add(text)
+    return n_nonempty > len(seen)
 
 
 def _has_negative_qty(rt: RawTable, qty_col: str | None) -> bool:
@@ -1564,6 +1583,19 @@ def infer_mapping(
             return
         entity_columns[entity] = cleaned
 
+    def _maybe_assign_purchase_lines_from_flat_purchases() -> None:
+        """Purchases-only flat sheet: also map purchase_lines when receipt_id repeats."""
+        if "purchases" not in chosen_tables or "purchase_lines" in chosen_tables:
+            return
+        rid_col = entity_columns.get("purchases", {}).get("receipt_id")
+        if not rid_col:
+            return
+        tname = chosen_tables["purchases"]
+        rt = raw_by_name[tname]
+        if not _receipt_id_repeats(rt, rid_col):
+            return
+        chosen_tables["purchase_lines"] = tname
+
     def _run_purchase_status() -> None:
         nonlocal purchase_status_map
         if "purchases" not in chosen_tables:
@@ -1653,29 +1685,33 @@ def infer_mapping(
     def _apply_simple_drops_from_issues(cur_issues: list[Issue]) -> bool:
         """Drop simple fields/entities so they never fail the mapping. Returns True if changed."""
         changed = False
-        ents_to_drop: set[Entity] = set()
+        ents_to_drop: dict[Entity, str] = {}
         fields_to_drop: list[tuple[Entity, str, str]] = []
+
+        def _mark_ent_drop(ent: Entity, reason: str) -> None:
+            if ent not in ents_to_drop:
+                ents_to_drop[ent] = reason
 
         for iss in cur_issues:
             ent_d = _simple_entity_from_step(iss.step)
             if ent_d is None:
                 continue
             if iss.step == "C_purchases" and iss.severity == "error":
-                ents_to_drop.add("purchases")
+                _mark_ent_drop("purchases", iss.message)
                 continue
             if iss.drop_field and "." in iss.drop_field:
                 ent_name, field_name = iss.drop_field.split(".", 1)
                 if ent_name != ent_d:
                     continue
                 req = SIMPLE_REQUIRED.get(ent_d, set())
-                if field_name in req or (
-                    ent_d == "drug_info"
-                    and field_name in {"active_ingredient", "is_prescription"}
-                    and not (
-                        set(entity_columns.get(ent_d, {})) - {field_name}
-                    ).intersection({"active_ingredient", "is_prescription"})
-                ):
-                    ents_to_drop.add(ent_d)
+                at_least = SIMPLE_AT_LEAST_ONE.get(ent_d)
+                last_at_least = (
+                    at_least is not None
+                    and field_name in at_least
+                    and not (set(entity_columns.get(ent_d, {})) - {field_name}) & at_least
+                )
+                if field_name in req or last_at_least:
+                    _mark_ent_drop(ent_d, iss.message)
                 else:
                     fields_to_drop.append((ent_d, field_name, iss.message))
                 continue
@@ -1686,12 +1722,12 @@ def infer_mapping(
             if both_fields:
                 pick = _pick_field_to_drop(ent_d, both_fields)
                 if pick is None:
-                    ents_to_drop.add(ent_d)
+                    _mark_ent_drop(ent_d, iss.message)
                 else:
                     fields_to_drop.append((ent_d, pick, iss.message))
                 continue
             # Unknown simple error: drop the entity rather than fail the shop.
-            ents_to_drop.add(ent_d)
+            _mark_ent_drop(ent_d, iss.message)
 
         for ent_d, field_name, reason in fields_to_drop:
             if ent_d in ents_to_drop:
@@ -1707,16 +1743,15 @@ def infer_mapping(
                         message=f"dropped {field_name}: {reason}",
                     )
                 )
-                if ent_d == "drug_info" and not (
-                    set(cols) & {"active_ingredient", "is_prescription"}
-                ):
-                    ents_to_drop.add(ent_d)
+                at_least = SIMPLE_AT_LEAST_ONE.get(ent_d)
+                if at_least is not None and not (set(cols) & at_least):
+                    _mark_ent_drop(ent_d, reason)
                 req = SIMPLE_REQUIRED.get(ent_d, set())
                 if field_name in req or (req and not req <= set(cols)):
-                    ents_to_drop.add(ent_d)
-        for ent_d in ents_to_drop:
+                    _mark_ent_drop(ent_d, reason)
+        for ent_d, reason in ents_to_drop.items():
             if ent_d in chosen_tables:
-                _drop_simple_entity(ent_d, "validation error on simple entity")
+                _drop_simple_entity(ent_d, reason)
                 changed = True
         return changed
 
@@ -1724,6 +1759,8 @@ def infer_mapping(
     for simple_ent in list(SIMPLE_ENTITIES):
         if simple_ent in chosen_tables:
             _run_step_b_simple(simple_ent)
+            if simple_ent == "purchases":
+                _maybe_assign_purchase_lines_from_flat_purchases()
     _run_purchase_status()
 
     mapping = _assemble_current()
@@ -1736,11 +1773,38 @@ def infer_mapping(
         fresh_issues, canon = validate_mapping(raw, mapping)
         issues = [*dropped_notes, *fresh_issues]
 
-    remaining_errs = [
-        iss.message
-        for iss in issues
-        if iss.severity == "error" and _simple_entity_from_step(iss.step) is None
-    ]
+    # Any simple entity that still carries an error after field drops is removed entirely
+    # so pipeline never sees mapping_failed for a simple-entity problem.
+    surviving_msgs: dict[Entity, str] = {}
+    for iss in issues:
+        if iss.severity != "error":
+            continue
+        ent = _simple_entity_from_step(iss.step)
+        if ent is not None and ent in chosen_tables and ent not in surviving_msgs:
+            surviving_msgs[ent] = iss.message
+    if surviving_msgs:
+        for ent, reason in surviving_msgs.items():
+            _drop_simple_entity(ent, reason)
+        mapping = _assemble_current()
+        fresh_issues, canon = validate_mapping(raw, mapping)
+        issues = [*dropped_notes, *fresh_issues]
+
+    cleaned_issues: list[Issue] = []
+    for iss in issues:
+        if iss.severity == "error" and _simple_entity_from_step(iss.step) is not None:
+            cleaned_issues.append(
+                Issue(
+                    step=iss.step,
+                    severity="warning",
+                    message=iss.message,
+                    drop_field=iss.drop_field,
+                )
+            )
+        else:
+            cleaned_issues.append(iss)
+    issues = cleaned_issues
+
+    remaining_errs = [iss.message for iss in issues if iss.severity == "error"]
     return InferResult(
         mapping=mapping,
         steps=steps_log,

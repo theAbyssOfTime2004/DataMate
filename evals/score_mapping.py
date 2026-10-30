@@ -3,10 +3,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-from datamate.mapping.model import Mapping, TableMapping
+from datamate.mapping.fields import LATER_FIELDS, SIMPLE_ENTITIES
+from datamate.mapping.model import Entity, Mapping, TableMapping
 from datamate.parse import normalize_label
 
 Verdict = Literal["correct", "wrong", "missing", "extra"]
+
+_ORDER_PATH_ENTITIES: frozenset[Entity] = frozenset(
+    {"orders", "order_lines", "products", "unit_conversions", "customers"}
+)
+_SIMPLE_ENTITY_SET: frozenset[Entity] = frozenset(SIMPLE_ENTITIES)
+_LATER_KEYS: frozenset[str] = frozenset(
+    f"{ent}.{fname}" for ent, names in LATER_FIELDS.items() for fname in names
+)
 
 
 def _norm_key(raw: str) -> str:
@@ -22,6 +31,18 @@ def _walk_in_set(values: list[str]) -> set[str]:
     return {key for v in values if (key := _norm_key(v))}
 
 
+def _is_order_path_column(entity: Entity, field_name: str) -> bool:
+    if entity not in _ORDER_PATH_ENTITIES:
+        return False
+    return f"{entity}.{field_name}" not in _LATER_KEYS
+
+
+def _is_new_entity_column(entity: Entity, field_name: str) -> bool:
+    if entity in _SIMPLE_ENTITY_SET:
+        return True
+    return f"{entity}.{field_name}" in _LATER_KEYS
+
+
 @dataclass
 class FieldVerdict:
     kind: Literal["column", "status"]
@@ -32,7 +53,35 @@ class FieldVerdict:
 
 
 @dataclass
+class PathScore:
+    n_correct: int
+    n_wrong: int
+    n_missing: int
+    field_accuracy: float
+    columns: list[FieldVerdict] = field(default_factory=list)
+    statuses: list[FieldVerdict] = field(default_factory=list)
+    extra_columns: list[FieldVerdict] = field(default_factory=list)
+    extra_statuses: list[FieldVerdict] = field(default_factory=list)
+    table_notes: list[str] = field(default_factory=list)
+
+    @property
+    def n_extra(self) -> int:
+        return len(self.extra_columns) + len(self.extra_statuses)
+
+    def mismatches(self) -> list[FieldVerdict]:
+        out: list[FieldVerdict] = []
+        for item in (*self.columns, *self.statuses):
+            if item.verdict in ("wrong", "missing"):
+                out.append(item)
+        out.extend(self.extra_columns)
+        out.extend(self.extra_statuses)
+        return out
+
+
+@dataclass
 class MappingScore:
+    """Top-level counts are the order_path group (POC-comparable, e.g. 141/143)."""
+
     n_correct: int
     n_wrong: int
     n_missing: int
@@ -48,6 +97,8 @@ class MappingScore:
     extra_columns: list[FieldVerdict] = field(default_factory=list)
     extra_statuses: list[FieldVerdict] = field(default_factory=list)
     table_notes: list[str] = field(default_factory=list)
+    order_path: PathScore | None = None
+    new_entities: PathScore | None = None
 
     @property
     def n_extra(self) -> int:
@@ -63,10 +114,17 @@ class MappingScore:
         return out
 
 
-def _score_tables(pred: Mapping, gold: Mapping) -> tuple[bool, list[str]]:
+def _score_tables(
+    pred: Mapping,
+    gold: Mapping,
+    *,
+    entities: frozenset[Entity] | None = None,
+) -> tuple[bool, list[str]]:
     notes: list[str] = []
     ok = True
     for entity, gtm in gold.tables.items():
+        if entities is not None and entity not in entities:
+            continue
         if gtm.source == "readme":
             continue
         ptm = pred.tables.get(entity)
@@ -93,8 +151,11 @@ def _score_tables(pred: Mapping, gold: Mapping) -> tuple[bool, list[str]]:
     return ok, notes
 
 
-def _score_columns(
-    pred: Mapping, gold: Mapping
+def _score_columns_filtered(
+    pred: Mapping,
+    gold: Mapping,
+    *,
+    include,
 ) -> tuple[list[FieldVerdict], list[FieldVerdict]]:
     scored: list[FieldVerdict] = []
     extras: list[FieldVerdict] = []
@@ -103,6 +164,8 @@ def _score_columns(
             continue
         pred_cols = pred.tables[entity].columns if entity in pred.tables else {}
         for field_name, gold_col in gtm.columns.items():
+            if not include(entity, field_name):
+                continue
             pred_col = pred_cols.get(field_name)
             if pred_col is None:
                 verdict: Verdict = "missing"
@@ -123,6 +186,8 @@ def _score_columns(
     for entity, ptm in pred.tables.items():
         gold_cols = gold.tables[entity].columns if entity in gold.tables else {}
         for field_name, pred_col in ptm.columns.items():
+            if not include(entity, field_name):
+                continue
             if field_name in gold_cols:
                 continue
             extras.append(
@@ -146,11 +211,11 @@ def _status_index(status_map: dict[str, str]) -> dict[str, tuple[str, str]]:
     return out
 
 
-def _score_status(
-    pred: Mapping, gold: Mapping
+def _score_status_map(
+    pred_map: dict[str, str], gold_map: dict[str, str]
 ) -> tuple[list[FieldVerdict], list[FieldVerdict]]:
-    gold_idx = _status_index(gold.status_map)
-    pred_idx = _status_index(pred.status_map)
+    gold_idx = _status_index(gold_map)
+    pred_idx = _status_index(pred_map)
     scored: list[FieldVerdict] = []
     for nk, (gold_raw, gold_st) in gold_idx.items():
         hit = pred_idx.get(nk)
@@ -193,34 +258,71 @@ def _score_status(
     return scored, extras
 
 
-def score(pred: Mapping, gold: Mapping) -> MappingScore:
-    tables_ok, table_notes = _score_tables(pred, gold)
-    columns, extra_columns = _score_columns(pred, gold)
-    statuses, extra_statuses = _score_status(pred, gold)
-
+def _path_from_parts(
+    columns: list[FieldVerdict],
+    statuses: list[FieldVerdict],
+    extra_columns: list[FieldVerdict],
+    extra_statuses: list[FieldVerdict],
+    *,
+    table_notes: list[str] | None = None,
+) -> PathScore:
     n_correct = sum(1 for v in (*columns, *statuses) if v.verdict == "correct")
     n_wrong = sum(1 for v in (*columns, *statuses) if v.verdict == "wrong")
     n_missing = sum(1 for v in (*columns, *statuses) if v.verdict == "missing")
     denom = n_correct + n_wrong + n_missing
-    field_accuracy = 1.0 if denom == 0 else n_correct / denom
-
-    status_ok = all(v.verdict == "correct" for v in statuses)
-    walk_in_ok = _walk_in_set(pred.walk_in_values) == _walk_in_set(gold.walk_in_values)
-
-    return MappingScore(
+    return PathScore(
         n_correct=n_correct,
         n_wrong=n_wrong,
         n_missing=n_missing,
-        field_accuracy=field_accuracy,
+        field_accuracy=1.0 if denom == 0 else n_correct / denom,
+        columns=columns,
+        statuses=statuses,
+        extra_columns=extra_columns,
+        extra_statuses=extra_statuses,
+        table_notes=list(table_notes or ()),
+    )
+
+
+def score(pred: Mapping, gold: Mapping) -> MappingScore:
+    tables_ok, table_notes = _score_tables(pred, gold, entities=_ORDER_PATH_ENTITIES)
+    _, ne_table_notes = _score_tables(pred, gold, entities=_SIMPLE_ENTITY_SET)
+
+    op_cols, op_extra_cols = _score_columns_filtered(
+        pred, gold, include=_is_order_path_column
+    )
+    op_sts, op_extra_sts = _score_status_map(pred.status_map, gold.status_map)
+    order_path = _path_from_parts(
+        op_cols, op_sts, op_extra_cols, op_extra_sts, table_notes=table_notes
+    )
+
+    ne_cols, ne_extra_cols = _score_columns_filtered(
+        pred, gold, include=_is_new_entity_column
+    )
+    ne_sts, ne_extra_sts = _score_status_map(
+        pred.purchase_status_map, gold.purchase_status_map
+    )
+    new_entities = _path_from_parts(
+        ne_cols, ne_sts, ne_extra_cols, ne_extra_sts, table_notes=ne_table_notes
+    )
+    status_ok = all(v.verdict == "correct" for v in op_sts)
+    walk_in_ok = _walk_in_set(pred.walk_in_values) == _walk_in_set(gold.walk_in_values)
+
+    return MappingScore(
+        n_correct=order_path.n_correct,
+        n_wrong=order_path.n_wrong,
+        n_missing=order_path.n_missing,
+        field_accuracy=order_path.field_accuracy,
         tables_ok=tables_ok,
         status_ok=status_ok,
         walk_in_ok=walk_in_ok,
         customer_identity_ok=pred.customer_identity == gold.customer_identity,
         return_rule_ok=pred.return_rule == gold.return_rule,
         data_end_ok=pred.data_end_date == gold.data_end_date,
-        columns=columns,
-        statuses=statuses,
-        extra_columns=extra_columns,
-        extra_statuses=extra_statuses,
+        columns=order_path.columns,
+        statuses=order_path.statuses,
+        extra_columns=order_path.extra_columns,
+        extra_statuses=order_path.extra_statuses,
         table_notes=table_notes,
+        order_path=order_path,
+        new_entities=new_entities,
     )

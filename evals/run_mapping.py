@@ -206,7 +206,17 @@ def _format_field_acc(ms: MappingScore | None) -> str:
     if ms is None:
         return "—"
     denom = ms.n_correct + ms.n_wrong + ms.n_missing
-    return f"{ms.field_accuracy:.3f} ({ms.n_correct}/{denom})"
+    order_s = f"{ms.field_accuracy:.3f} ({ms.n_correct}/{denom})"
+    ne = ms.new_entities
+    if ne is None:
+        return order_s
+    ne_denom = ne.n_correct + ne.n_wrong + ne.n_missing
+    if ne_denom == 0 and ne.n_extra == 0:
+        return f"{order_s} | new —"
+    return (
+        f"{order_s} | new {ne.field_accuracy:.3f} ({ne.n_correct}/{ne_denom})"
+        + (f" extra={ne.n_extra}" if ne.n_extra else "")
+    )
 
 
 def _format_mismatch_block(biz_id: str, run: BusinessRun) -> list[str]:
@@ -269,6 +279,16 @@ def _format_mismatch_block(biz_id: str, run: BusinessRun) -> list[str]:
         else:
             lines.append(
                 f"- status `{item.key}`: gold=`{item.gold}` pred=`{item.pred}` ({item.verdict})"
+            )
+    if ms.new_entities is not None:
+        for note in ms.new_entities.table_notes:
+            any_line = True
+            lines.append(f"- new-entity tables: {note}")
+        for item in ms.new_entities.mismatches():
+            any_line = True
+            prefix = "new-entity column" if item.kind == "column" else "purchase_status"
+            lines.append(
+                f"- {prefix} `{item.key}`: gold=`{item.gold}` pred=`{item.pred}` ({item.verdict})"
             )
     if run.stats.val_messages:
         any_line = True

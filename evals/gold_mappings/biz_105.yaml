@@ -1,5 +1,6 @@
 business_id: biz_105
 status: verified          # 2026-10-27, user reviewed
+simple_status: draft      # E1d new entities below; user must verify before using as gold
 format_family: handwritten_monthly_sheets   # sổ ghi tay, mỗi tháng một sheet
 data_end_date: 2026-06-24             # README
 customer_identity: by_name            # không có mã khách
@@ -60,6 +61,47 @@ tables:
       product_name: "Hàng hóa"
       base_unit: "Đơn vị tính"
 
+  # --- E1d simple entities (draft) ---
+  purchases:                          # flat SoNhapHang: header fields repeat per line
+    sources:
+      - {file: SoNhapHang.xlsx, sheet: Sheet1, header_row: 1}
+    columns:
+      receipt_id: "Số phiếu"
+      receipt_date: "Ngày nhập"
+      supplier_name: "Nhà cung cấp"
+      # TODO kiểm: không map total_amount — cột "Thành tiền" là thành tiền DÒNG (README), không phải tổng phiếu
+
+  purchase_lines:
+    sources:
+      - {file: SoNhapHang.xlsx, sheet: Sheet1, header_row: 1}
+    columns:
+      receipt_id: "Số phiếu"
+      receipt_date: "Ngày nhập"
+      supplier_name: "Nhà cung cấp"
+      product_name: "Tên mặt hàng"
+      qty: "SL nhập"
+      unit: "ĐVT"
+      unit_cost: "Giá nhập"
+      line_amount: "Thành tiền"
+
+  stock_snapshot:                     # cùng file TonKho với products (danh mục + tồn)
+    sources:
+      - {file: TonKho.xlsx, sheet: Sheet1, header_row: 1}
+    columns:
+      product_name: "Hàng hóa"
+      unit: "Đơn vị tính"
+      qty_on_hand: "Tồn cuối"
+      # as_of_date: ETL điền từ data_end_date (không có cột ngày)
+
+  price_history:
+    sources:
+      - {file: BangGia.xlsx, sheet: Sheet1, header_row: 1}
+    columns:
+      effective_date: "Ngày áp dụng"
+      product_name: "ten_hang"
+      price: "Giá mới"
+      # TODO kiểm: bỏ "Giá cũ" — không có field canonical tương ứng
+
 notes:
   - "Dòng 1 của mỗi sheet là header nhóm 'Hàng | Tiền | Đơn'; header thật ở dòng 2."
   - "QUAN TRỌNG: ở dòng trả hàng (số lượng âm), cột Giờ là LÚC TRẢ (README) và Ngày giao dịch cũng bằng ngày trả (ĐÃ KIỂM: 355/355 dòng âm, Ngày giao dịch = ngày của Giờ). Ngày đặt và giờ đặt của đơn phải lấy từ các dòng số lượng dương."
@@ -68,3 +110,4 @@ notes:
   - "ĐÃ KIỂM doanh thu (bỏ dòng trùng; đơn trạng thái completed/shipping, không có dòng âm; cộng Trị giá; ngày đặt từ dòng dương): 4/4 tháng khớp đáp án."
   - "Không có mã hàng: product_id = product_name."
   - "Có thêm SoNhapHang.xlsx (phiếu nhập) và BangGia.xlsx (lịch sử giá): chưa cần cho POC."
+  - "E1d: không có payments/debts/expenses/employees/lots/deliveries/drug_info; không có amount_paid/amount_due/phone trên sổ bán."
