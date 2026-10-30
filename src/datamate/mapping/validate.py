@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel
 
 from datamate.io.raw import BusinessRaw
-from datamate.mapping.fields import REQUIRED_FIELDS
+from datamate.mapping.fields import REQUIRED_FIELDS, SIMPLE_ENTITIES, SIMPLE_REQUIRED
 from datamate.mapping.model import Entity, Mapping, mapping_fingerprint
 
 if TYPE_CHECKING:
@@ -24,6 +24,23 @@ StepName = Literal[
     "C",
     "D",
 ]
+
+_PRODUCT_JOIN_ENTITIES: frozenset[str] = frozenset(
+    {
+        "purchase_lines",
+        "lots",
+        "sale_lots",
+        "stock_snapshot",
+        "stock_moves",
+        "price_history",
+        "drug_info",
+    }
+)
+_ORDER_JOIN_ENTITIES: frozenset[str] = frozenset(
+    {"payments", "debts", "deliveries", "sale_lots"}
+)
+_SIMPLE_PARSE_RATE_MIN = 0.95
+_JOIN_RATE_WARN = 0.9
 
 _ID_CODE_RE = re.compile(r"^[A-Za-z]{1,6}[-_]?\d{2,}$")
 _PHONE_LIKE_RE = re.compile(r"^0(?:\s*\d){9,10}$")
@@ -232,7 +249,14 @@ def validate_mapping(
         except MappingError as exc:
             msg = str(exc)
             step_target = "A"
-            for ent_key in ("orders", "order_lines", "products", "unit_conversions", "customers"):
+            for ent_key in (
+                "orders",
+                "order_lines",
+                "products",
+                "unit_conversions",
+                "customers",
+                *SIMPLE_ENTITIES,
+            ):
                 if f"Entity {ent_key!r} field" in msg:
                     step_target = f"B_{ent_key}"
                     break
@@ -389,4 +413,172 @@ def validate_mapping(
                 )
             )
 
+    _validate_simple_entities(mapping, canon, issues)
+
     return issues, canon
+
+
+def _join_rate(left_keys: list[object], right_keys: set[object]) -> float | None:
+    left = [k for k in left_keys if k is not None]
+    if not left:
+        return None
+    return sum(1 for k in left if k in right_keys) / len(left)
+
+
+def _validate_simple_entities(
+    mapping: Mapping,
+    canon: CanonicalData,
+    issues: list[Issue],
+) -> None:
+    rep = canon.report
+    for ent in SIMPLE_ENTITIES:
+        tm = mapping.tables.get(ent)
+        if tm is None:
+            continue
+        for field_name in tm.columns:
+            st = rep.parse_stats.get(f"{ent}.{field_name}")
+            if st is None or st.non_null == 0:
+                continue
+            if st.rate < _SIMPLE_PARSE_RATE_MIN:
+                issues.append(
+                    Issue(
+                        step=f"B_{ent}",
+                        severity="warning",
+                        drop_field=f"{ent}.{field_name}",
+                        message=(
+                            f"Field {ent}.{field_name!r} parse rate is {st.rate:.1%} "
+                            f"(< {_SIMPLE_PARSE_RATE_MIN:.0%}, {st.parsed}/{st.non_null}). "
+                            f"Examples: {st.examples}"
+                        ),
+                    )
+                )
+
+        # Required fields must still be present (drug_info: at least one of two).
+        mapped = set(tm.columns)
+        req = SIMPLE_REQUIRED.get(ent, set())
+        missing_req = sorted(req - mapped)
+        if missing_req:
+            issues.append(
+                Issue(
+                    step=f"B_{ent}",
+                    severity="warning",
+                    drop_field=f"{ent}.{missing_req[0]}",
+                    message=f"Entity {ent!r} missing required field(s) {missing_req}",
+                )
+            )
+        if ent == "drug_info" and not (
+            mapped & {"active_ingredient", "is_prescription"}
+        ):
+            issues.append(
+                Issue(
+                    step="B_drug_info",
+                    severity="warning",
+                    drop_field="drug_info.active_ingredient",
+                    message=(
+                        "drug_info needs active_ingredient or is_prescription; dropping entity"
+                    ),
+                )
+            )
+
+    product_keys: set[object] = set()
+    if not canon.products.empty and "product_key" in canon.products.columns:
+        product_keys.update(canon.products["product_key"].tolist())
+    if not canon.order_lines.empty and "product_key" in canon.order_lines.columns:
+        product_keys.update(canon.order_lines["product_key"].tolist())
+    product_keys.discard(None)
+
+    order_ids: set[object] = set()
+    if not canon.orders.empty and "order_id" in canon.orders.columns:
+        order_ids.update(canon.orders["order_id"].tolist())
+    order_ids.discard(None)
+
+    for ent in _PRODUCT_JOIN_ENTITIES:
+        frame = getattr(canon, ent, None)
+        if frame is None or frame.empty or "product_key" not in frame.columns:
+            continue
+        rate = _join_rate(frame["product_key"].tolist(), product_keys)
+        if rate is not None and rate < _JOIN_RATE_WARN:
+            issues.append(
+                Issue(
+                    step=f"B_{ent}",
+                    severity="warning",
+                    message=(
+                        f"{ent}.product_key join rate to products/order_lines is "
+                        f"{rate:.1%} (< {_JOIN_RATE_WARN:.0%})"
+                    ),
+                )
+            )
+
+    for ent in _ORDER_JOIN_ENTITIES:
+        frame = getattr(canon, ent, None)
+        if frame is None or frame.empty or "order_id" not in frame.columns:
+            continue
+        rate = _join_rate(frame["order_id"].tolist(), order_ids)
+        if rate is not None and rate < _JOIN_RATE_WARN:
+            issues.append(
+                Issue(
+                    step=f"B_{ent}",
+                    severity="warning",
+                    message=(
+                        f"{ent}.order_id join rate to orders is "
+                        f"{rate:.1%} (< {_JOIN_RATE_WARN:.0%})"
+                    ),
+                )
+            )
+
+    # purchases.total_amount vs sum(purchase_lines.line_amount) per receipt
+    if (
+        "purchases" in mapping.tables
+        and "purchase_lines" in mapping.tables
+        and not canon.purchases.empty
+        and not canon.purchase_lines.empty
+        and "total_amount" in mapping.tables["purchases"].columns
+        and "line_amount" in mapping.tables["purchase_lines"].columns
+    ):
+        from collections import Counter
+
+        line_sum: Counter[object] = Counter()
+        for row in canon.purchase_lines.to_dict("records"):
+            rid = row.get("receipt_id")
+            amt = row.get("line_amount")
+            if rid is not None and amt is not None:
+                line_sum[rid] += int(amt)
+        checked = 0
+        matched = 0
+        for row in canon.purchases.to_dict("records"):
+            rid = row.get("receipt_id")
+            total = row.get("total_amount")
+            if rid is None or total is None or rid not in line_sum:
+                continue
+            checked += 1
+            if abs(int(total) - line_sum[rid]) <= 1:
+                matched += 1
+        if checked > 0 and matched / checked < 0.8:
+            issues.append(
+                Issue(
+                    step="B_purchases",
+                    severity="warning",
+                    message=(
+                        f"purchases.total_amount matches sum(purchase_lines.line_amount) "
+                        f"in only {matched / checked:.1%} of receipts (< 80%)"
+                    ),
+                )
+            )
+
+    if "debts" in mapping.tables and not canon.debts.empty:
+        for row in canon.debts.to_dict("records"):
+            remaining = row.get("amount_remaining")
+            total = row.get("amount_total")
+            if remaining is None or total is None:
+                continue
+            if int(remaining) > int(total):
+                issues.append(
+                    Issue(
+                        step="B_debts",
+                        severity="warning",
+                        message=(
+                            "debts.amount_remaining exceeds amount_total for at least one row"
+                        ),
+                    )
+                )
+                break

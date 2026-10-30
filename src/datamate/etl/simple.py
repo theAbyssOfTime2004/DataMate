@@ -21,7 +21,7 @@ from datamate.etl.build import (
 from datamate.etl.schema import TABLE_COLUMNS
 from datamate.io.raw import BusinessRaw
 from datamate.mapping.fields import FIELD_TYPES, SIMPLE_ENTITIES, SIMPLE_REQUIRED
-from datamate.mapping.model import Entity, Mapping
+from datamate.mapping.model import Entity, Mapping, TableMapping
 from datamate.parse import (
     normalize_label,
     parse_date,
@@ -216,6 +216,78 @@ def load_simple_entity(
     return _records_to_df(rows, cols_out)
 
 
+def _source_keys(tm: TableMapping) -> list[tuple[str, str | None, int]]:
+    return [(s.file, s.sheet, s.header_row) for s in tm.sources]
+
+
+def _is_flat_purchase_sheet(mapping: Mapping) -> bool:
+    purchases_tm = mapping.tables.get("purchases")
+    lines_tm = mapping.tables.get("purchase_lines")
+    if purchases_tm is None or lines_tm is None:
+        return False
+    if not purchases_tm.sources or not lines_tm.sources:
+        return False
+    return _source_keys(purchases_tm) == _source_keys(lines_tm)
+
+
+def _dedupe_purchases_by_receipt(
+    df: pd.DataFrame,
+    dedupe_counts: Counter[str],
+) -> pd.DataFrame:
+    """Keep one row per receipt_id, filling each column with the first non-null value."""
+    if df.empty or "receipt_id" not in df.columns:
+        return df
+    cols = list(df.columns)
+    by_rid: dict[Any, dict[str, Any]] = {}
+    order: list[Any] = []
+    dropped = 0
+    for row in df.to_dict("records"):
+        rid = row.get("receipt_id")
+        if rid is None:
+            # Unkeyed rows stay as-is under a unique sentinel.
+            key = object()
+            by_rid[key] = row
+            order.append(key)
+            continue
+        if rid not in by_rid:
+            by_rid[rid] = dict(row)
+            order.append(rid)
+            continue
+        dropped += 1
+        existing = by_rid[rid]
+        for c in cols:
+            if existing.get(c) is None and row.get(c) is not None:
+                existing[c] = row[c]
+    if dropped:
+        dedupe_counts["purchases.flat_dedupe"] += dropped
+    return _records_to_df([by_rid[k] for k in order], tuple(cols))
+
+
+def _recompute_purchase_totals_from_lines(
+    purchases: pd.DataFrame,
+    purchase_lines: pd.DataFrame,
+) -> pd.DataFrame:
+    if purchases.empty or purchase_lines.empty:
+        return purchases
+    if "receipt_id" not in purchases.columns or "receipt_id" not in purchase_lines.columns:
+        return purchases
+    if "line_amount" not in purchase_lines.columns:
+        return purchases
+    sums: dict[Any, int] = {}
+    for row in purchase_lines.to_dict("records"):
+        rid = row.get("receipt_id")
+        amt = row.get("line_amount")
+        if rid is None or amt is None:
+            continue
+        sums[rid] = sums.get(rid, 0) + int(amt)
+    records = purchases.to_dict("records")
+    for row in records:
+        rid = row.get("receipt_id")
+        if rid in sums:
+            row["total_amount"] = sums[rid]
+    return _records_to_df(records, tuple(purchases.columns))
+
+
 def load_all_simple_tables(
     raw: BusinessRaw,
     mapping: Mapping,
@@ -238,4 +310,16 @@ def load_all_simple_tables(
             key_by_name=key_by_name,
             walk_in_norm_set=walk_in_norm_set,
         )
+
+    if _is_flat_purchase_sheet(mapping):
+        out["purchases"] = _dedupe_purchases_by_receipt(out["purchases"], dedupe_counts)
+        purchases_tm = mapping.tables["purchases"]
+        lines_tm = mapping.tables["purchase_lines"]
+        total_col = purchases_tm.columns.get("total_amount")
+        line_col = lines_tm.columns.get("line_amount")
+        if total_col is not None and total_col == line_col:
+            out["purchases"] = _recompute_purchase_totals_from_lines(
+                out["purchases"], out["purchase_lines"]
+            )
+
     return out

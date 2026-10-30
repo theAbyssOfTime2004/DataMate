@@ -11,12 +11,19 @@ from datamate.config import settings
 from datamate.io.profile import BusinessProfile, ColumnProfile, TableProfile, render_card
 from datamate.io.raw import BusinessRaw, RawTable
 from datamate.llm.client import LLMError, LLMUnavailable
-from datamate.mapping.fields import FIELD_DOCS, LATER_FIELDS, REQUIRED_FIELDS
+from datamate.mapping.fields import (
+    FIELD_DOCS,
+    LATER_FIELDS,
+    REQUIRED_FIELDS,
+    SIMPLE_ENTITIES,
+    SIMPLE_REQUIRED,
+)
 from datamate.mapping.model import (
     Entity,
     JoinSpec,
     Mapping,
     OrderStatus,
+    PurchaseStatus,
     ReturnRule,
     SourceSpec,
     TableMapping,
@@ -46,12 +53,32 @@ _WHOLE_ORDER_ROW_HINT = (
     "amount (tiền hàng / giá trị hàng: before order-level discount, without shipping), NOT the "
     "amount the customer pays (tổng tiền khách trả, after discount and shipping).\n"
 )
-_ALL_ENTITIES: tuple[Entity, ...] = (
+_ORDER_ENTITIES: tuple[Entity, ...] = (
     "orders",
     "order_lines",
     "products",
     "unit_conversions",
     "customers",
+)
+_ALL_ENTITIES: tuple[Entity, ...] = (*_ORDER_ENTITIES, *SIMPLE_ENTITIES)
+_SIMPLE_ENTITY_SET: frozenset[Entity] = frozenset(SIMPLE_ENTITIES)
+_PURCHASE_SHARE: frozenset[Entity] = frozenset({"purchases", "purchase_lines"})
+
+_SIMPLE_ENTITY_LINES: tuple[tuple[Entity, str], ...] = (
+    ("payments", "one payment / receipt of money from a customer (phiếu thu, thanh toán)"),
+    ("debts", "one customer debt / AR balance row (công nợ, phải thu)"),
+    ("purchases", "one purchase receipt header (phiếu nhập, nhập hàng)"),
+    ("purchase_lines", "one line on a purchase receipt (chi tiết nhập)"),
+    ("suppliers", "one supplier in a directory (nhà cung cấp)"),
+    ("stock_snapshot", "on-hand qty for one product (tồn kho)"),
+    ("stock_moves", "one stock in/out movement (xuất nhập tồn, thẻ kho)"),
+    ("lots", "one lot / batch with expiry (lô, hạn dùng)"),
+    ("sale_lots", "which lot was sold on an order line (lô bán)"),
+    ("price_history", "one historical selling price (lịch sử giá)"),
+    ("expenses", "one operating expense (chi phí, sổ chi)"),
+    ("employees", "one employee (nhân viên)"),
+    ("deliveries", "one delivery batch of an order (đợt giao)"),
+    ("drug_info", "drug active ingredient / Rx flag (hoạt chất, kê đơn)"),
 )
 
 
@@ -283,6 +310,9 @@ def _build_step_a_variants(profile: BusinessProfile) -> list[str]:
                     col_parts.append(c.name)
             t_lines.append(f"- `{tp.name}` | rows={tp.n_rows} | columns: {', '.join(col_parts)}")
         r_part = readme_short[:readme_cap] if readme_short else "(no README)"
+        simple_block = "\n".join(
+            f"- `{ent}`: {desc}" for ent, desc in _SIMPLE_ENTITY_LINES
+        )
         prompt = (
             "Assign each raw table of this shop to its canonical entity role:\n"
             "- `order_lines`: individual line items sold per order (or flat sales ledger where each row is a line item)\n"
@@ -290,12 +320,15 @@ def _build_step_a_variants(profile: BusinessProfile) -> list[str]:
             "- `products`: product / item catalog / price list\n"
             "- `unit_conversions`: unit conversion factor table (larger unit -> base unit)\n"
             "- `customers`: customer directory / list\n"
-            "- `none`: any other table (e.g. purchases/imports, inventory, cashbook, expenses, batches)\n\n"
+            f"{simple_block}\n"
+            "- `none`: table not used for any entity above\n\n"
             "Also set `orders_source`:\n"
             "- `own_table` if there is a separate `orders` header table;\n"
             "- `order_lines` if there is no separate `orders` header table and order fields live on `order_lines`.\n"
             "Rules: Exactly ONE table must be assigned `order_lines`. If `orders_source` is `own_table`, "
-            "exactly ONE table must be assigned `orders` (otherwise no table is `orders`).\n\n"
+            "exactly ONE table must be assigned `orders` (otherwise no table is `orders`). "
+            "Each other entity takes 0 or 1 table. A raw table may serve only one entity, except a flat "
+            "purchase sheet may be both `purchases` and `purchase_lines` (header fields repeated on each row).\n\n"
             f"### README\n{r_part}\n\n"
             f"### Raw Tables\n" + "\n".join(t_lines)
         )
@@ -332,6 +365,15 @@ def _step_a_schema(table_names: list[str]) -> dict[str, Any]:
     }
 
 
+def _required_for_entity(entity: Entity, orders_source: str = "own_table") -> set[str]:
+    if entity in _SIMPLE_ENTITY_SET:
+        return set(SIMPLE_REQUIRED.get(entity, set()))
+    required = set(REQUIRED_FIELDS.get(entity, ()))
+    if entity == "orders" and orders_source == "own_table":
+        required.add("order_id")
+    return required
+
+
 def _build_step_b_variants(
     entity: Entity,
     tp: TableProfile,
@@ -339,11 +381,15 @@ def _build_step_b_variants(
     orders_source: str = "own_table",
 ) -> list[str]:
     fdocs = _step_b_field_docs(entity)
-    req = REQUIRED_FIELDS.get(entity, set())
+    req = _required_for_entity(entity, orders_source)
     field_lines = [
         f"- `{fname}` ({'REQUIRED' if fname in req else 'optional'}): {desc}"
         for fname, desc in fdocs.items()
     ]
+    if entity == "drug_info":
+        field_lines.append(
+            "- At least one of `active_ingredient` / `is_prescription` is required."
+        )
     fields_block = "\n".join(field_lines)
     readme_sec = _readme_for_table(readme_text, tp.source_files)
 
@@ -410,9 +456,7 @@ def _step_b_field_docs(entity: Entity) -> dict[str, str]:
 
 def _step_b_required_names(entity: Entity, orders_source: str) -> list[str]:
     """Canonical fields that must be present. Optional omissions are filled with null."""
-    required = set(REQUIRED_FIELDS.get(entity, ()))
-    if entity == "orders" and orders_source == "own_table":
-        required.add("order_id")
+    required = _required_for_entity(entity, orders_source)
     return [name for name in _step_b_field_docs(entity) if name in required]
 
 
@@ -557,6 +601,98 @@ def _step_c_schema(status_values: list[str]) -> dict[str, Any]:
     }
 
 
+def _build_purchase_status_variants(
+    status_counts: list[tuple[str, int]],
+    readme_text: str | None,
+) -> list[str]:
+    conv = _readme_conventions_only(readme_text)
+    vals_lines = [f'- "{val}" (count: {cnt})' for val, cnt in status_counts]
+    vals_block = "\n".join(vals_lines)
+    variants: list[str] = []
+    for cap in (2000, 800, 300):
+        prompt = (
+            "Map every distinct raw purchase receipt status to one of:\n"
+            "- `valid`: receipt counts (hợp lệ, đã nhập, hoàn thành, ok)\n"
+            "- `cancelled`: receipt was voided (huỷ, đã hủy, hủy phiếu)\n\n"
+            f"### README Conventions\n{conv[:cap]}\n\n"
+            f"### Distinct Raw Purchase Status Values\n{vals_block}"
+        )
+        variants.append(prompt)
+    return variants
+
+
+def _purchase_status_schema(status_values: list[str]) -> dict[str, Any]:
+    state_enum: list[PurchaseStatus] = ["valid", "cancelled"]
+    props = {val: {"type": "string", "enum": state_enum} for val in status_values}
+    return {
+        "type": "object",
+        "properties": props,
+        "required": status_values,
+        "additionalProperties": False,
+    }
+
+
+def _unmapped_raw_columns(rt: RawTable, mapped_cols: dict[str, str]) -> list[str]:
+    used = set(mapped_cols.values())
+    return [c for c in rt.columns if c not in used]
+
+
+def _later_fields_schema(field_names: list[str], free_columns: list[str]) -> dict[str, Any]:
+    col_enum: list[str | None] = [*free_columns, None]
+    props = {fname: {"enum": col_enum} for fname in field_names}
+    return {
+        "type": "object",
+        "properties": props,
+        "required": field_names,
+        "additionalProperties": False,
+    }
+
+
+def _build_later_fields_variants(
+    entity: Entity,
+    field_names: list[str],
+    tp: TableProfile,
+    free_columns: list[str],
+    readme_text: str | None,
+) -> list[str]:
+    fdocs = FIELD_DOCS[entity]
+    field_lines = [f"- `{fname}`: {fdocs[fname]}" for fname in field_names]
+    fields_block = "\n".join(field_lines)
+    free_block = ", ".join(f"`{c}`" for c in free_columns) or "(none)"
+    readme_sec = _readme_for_table(readme_text, tp.source_files)
+    variants: list[str] = []
+    for max_samples, include_top, readme_cap in [
+        (5, True, 2000),
+        (2, False, 800),
+        (1, False, 300),
+    ]:
+        card_str = _compact_table_card_for_step_b(
+            tp, max_samples=max_samples, include_top=include_top
+        )
+        r_str = readme_sec[:readme_cap] if readme_sec else "(no README section)"
+        prompt = (
+            f"Map optional late fields of `{entity}` to columns that are still unmapped.\n"
+            "Set a field to `null` if none of the free columns fit. Do not reuse a column "
+            "already mapped to another field.\n\n"
+            f"### Free columns\n{free_block}\n\n"
+            f"### Fields\n{fields_block}\n\n"
+            f"### README Context\n{r_str}\n\n"
+            f"### Table Profile\n{card_str}"
+        )
+        variants.append(prompt)
+    return variants
+
+
+def _simple_missing_required(entity: Entity, cleaned: dict[str, str]) -> list[str]:
+    required = SIMPLE_REQUIRED.get(entity, set())
+    missing = sorted(required - set(cleaned))
+    if entity == "drug_info":
+        if not ({"active_ingredient", "is_prescription"} & set(cleaned)):
+            return ["active_ingredient|is_prescription"]
+        return []
+    return missing
+
+
 def _has_negative_qty(rt: RawTable, qty_col: str | None) -> bool:
     if not qty_col or qty_col not in rt.df.columns:
         return False
@@ -628,6 +764,7 @@ def _assemble_mapping(
     status_map: dict[str, OrderStatus],
     walk_in_values: list[str],
     return_rule: ReturnRule,
+    purchase_status_map: dict[str, PurchaseStatus] | None = None,
 ) -> Mapping:
     tables_dict: dict[Entity, TableMapping] = {}
 
@@ -683,6 +820,18 @@ def _assemble_mapping(
             columns=ord_cols,
         )
 
+    for ent in SIMPLE_ENTITIES:
+        if ent not in chosen_tables:
+            continue
+        cols_map = dict(entity_columns.get(ent, {}))
+        if not cols_map:
+            continue
+        rt = raw_by_name[chosen_tables[ent]]
+        tables_dict[ent] = TableMapping(
+            sources=_build_source_specs_from_raw_table(rt, raw_by_name),
+            columns=cols_map,
+        )
+
     customer_identity = "by_code" if "customer_id" in ord_cols else "by_name"
     data_end_date = extract_data_end_date(profile.readme_text)
     notes: list[str] = []
@@ -696,6 +845,7 @@ def _assemble_mapping(
         walk_in_values=walk_in_values,
         return_rule=return_rule,
         status_map=status_map,
+        purchase_status_map=dict(purchase_status_map or {}),
         tables=tables_dict,
         notes=notes,
     )
@@ -704,10 +854,12 @@ def _assemble_mapping(
 def _parse_step_a_roles(
     ans_a: dict[str, Any],
     valid_table_names: set[str],
-) -> tuple[dict[Entity, str], str, str | None]:
+) -> tuple[dict[Entity, str], str, str | None, list[str]]:
+    """Parse step A. Role errors only for the order path; simple-entity conflicts are warnings."""
+    role_warnings: list[str] = []
     orders_source = ans_a.get("orders_source")
     if orders_source not in ("own_table", "order_lines"):
-        return {}, "order_lines", f"Invalid orders_source: {orders_source!r}"
+        return {}, "order_lines", f"Invalid orders_source: {orders_source!r}", role_warnings
 
     by_entity: dict[Entity, list[str]] = {}
     for item in ans_a.get("tables", []):
@@ -728,6 +880,7 @@ def _parse_step_a_roles(
             {},
             orders_source,
             f"Expected exactly 1 table for 'order_lines', got {ol_list}",
+            role_warnings,
         )
 
     chosen: dict[Entity, str] = {"order_lines": ol_list[0]}
@@ -738,19 +891,55 @@ def _parse_step_a_roles(
                 {},
                 orders_source,
                 f"orders_source is 'own_table' but 'orders' tables={ord_list}",
+                role_warnings,
             )
         if ord_list[0] == ol_list[0]:
             orders_source = "order_lines"
         else:
             chosen["orders"] = ord_list[0]
 
+    # Optional order-path entities: 0 or 1 table; more than one -> ignore (legacy behaviour).
     for opt_ent in ("products", "unit_conversions", "customers"):
         opt_typed: Entity = opt_ent  # type: ignore[assignment]
         lst = by_entity.get(opt_typed, [])
         if len(lst) == 1:
             chosen[opt_typed] = lst[0]
 
-    return chosen, orders_source, None
+    table_owner: dict[str, Entity] = {}
+    table_owner[chosen["order_lines"]] = "order_lines"
+    if "orders" in chosen:
+        table_owner[chosen["orders"]] = "orders"
+    for opt_ent in ("products", "unit_conversions", "customers"):
+        opt_typed = opt_ent  # type: ignore[assignment]
+        if opt_typed in chosen:
+            table_owner[chosen[opt_typed]] = opt_typed
+
+    for ent in SIMPLE_ENTITIES:
+        lst = by_entity.get(ent, [])
+        if len(lst) > 1:
+            role_warnings.append(
+                f"skipped {ent}: expected at most 1 table, got {lst}"
+            )
+            continue
+        if not lst:
+            continue
+        tname = lst[0]
+        owner = table_owner.get(tname)
+        if owner is not None and owner != ent:
+            share_ok = {owner, ent} <= _PURCHASE_SHARE
+            if not share_ok:
+                role_warnings.append(
+                    f"skipped {ent}: table {tname!r} already assigned to {owner!r}"
+                )
+                continue
+        chosen[ent] = tname
+        table_owner[tname] = ent
+
+    # Flat purchase sheet assigned only as purchase_lines: also map purchases from it.
+    if "purchase_lines" in chosen and "purchases" not in chosen:
+        chosen["purchases"] = chosen["purchase_lines"]
+
+    return chosen, orders_source, None, role_warnings
 
 
 def infer_mapping(
@@ -775,6 +964,7 @@ def infer_mapping(
     chosen_tables: dict[Entity, str] = {}
     orders_source = "order_lines"
     last_ans_a: dict[str, Any] = {}
+    early_warnings: list[Issue] = []
 
     def _run_step_a_with_role_retries(initial_repair_suffix: str | None = None) -> bool:
         nonlocal chosen_tables, orders_source, last_ans_a
@@ -798,7 +988,7 @@ def infer_mapping(
                 errors.append(f"Step A LLMError: {exc}")
                 return False
 
-            new_chosen, new_orders_source, role_err = _parse_step_a_roles(
+            new_chosen, new_orders_source, role_err, role_warns = _parse_step_a_roles(
                 last_ans_a, set(table_names)
             )
             if role_err is None:
@@ -808,6 +998,11 @@ def infer_mapping(
                 if sales_err is None:
                     chosen_tables = new_chosen
                     orders_source = new_orders_source
+                    early_warnings[:] = [i for i in early_warnings if i.step != "A"]
+                    for w in role_warns:
+                        early_warnings.append(
+                            Issue(step="A", severity="warning", message=w)
+                        )
                     return True
                 role_err = sales_err
             a_repair_msg = (
@@ -881,7 +1076,6 @@ def infer_mapping(
 
     status_map: dict[str, OrderStatus] = {}
     last_ans_c: dict[str, Any] = {}
-    early_warnings: list[Issue] = []
 
     def _drop_status_as_free_text(n_distinct: int) -> None:
         nonlocal status_map
@@ -1006,15 +1200,37 @@ def infer_mapping(
     if not _run_step_d():
         return InferResult(mapping=None, steps=steps_log, errors=errors)
 
+    purchase_status_map: dict[str, PurchaseStatus] = {}
+
+    def _assemble_current() -> Mapping:
+        return _assemble_mapping(
+            profile=profile,
+            raw_by_name=raw_by_name,
+            chosen_tables=chosen_tables,
+            orders_source=orders_source,
+            entity_columns=entity_columns,
+            status_map=status_map,
+            walk_in_values=walk_in_values,
+            return_rule=return_rule,
+            purchase_status_map=purchase_status_map,
+        )
+
+    # Order-path assemble excludes simple entities until after the repair loop (cache keys).
+    order_chosen = {
+        ent: tname
+        for ent, tname in chosen_tables.items()
+        if ent not in _SIMPLE_ENTITY_SET
+    }
     mapping = _assemble_mapping(
         profile=profile,
         raw_by_name=raw_by_name,
-        chosen_tables=chosen_tables,
+        chosen_tables=order_chosen,
         orders_source=orders_source,
         entity_columns=entity_columns,
         status_map=status_map,
         walk_in_values=walk_in_values,
         return_rule=return_rule,
+        purchase_status_map={},
     )
 
     issues, canon = validate_mapping(raw, mapping)
@@ -1059,15 +1275,21 @@ def infer_mapping(
         if not blocking and not fresh:
             if not persist:
                 break
+            order_chosen = {
+                ent: tname
+                for ent, tname in chosen_tables.items()
+                if ent not in _SIMPLE_ENTITY_SET
+            }
             mapping = _assemble_mapping(
                 profile=profile,
                 raw_by_name=raw_by_name,
-                chosen_tables=chosen_tables,
+                chosen_tables=order_chosen,
                 orders_source=orders_source,
                 entity_columns=entity_columns,
                 status_map=status_map,
                 walk_in_values=walk_in_values,
                 return_rule=return_rule,
+                purchase_status_map={},
             )
             fresh_issues, canon = validate_mapping(raw, mapping)
             issues = [*dropped_notes, *fresh_issues]
@@ -1109,9 +1331,9 @@ def infer_mapping(
                 need_rerun_c_from_a = True
                 need_rerun_d_from_a = True
 
-        # Run Step B for entities changed by Step A or explicitly flagged in problems_by_step
-        for ent in ("order_lines", "orders", "products", "unit_conversions", "customers"):
-            ent_typed: Entity = ent  # type: ignore[assignment]
+        # Run Step B for order entities changed by Step A or explicitly flagged
+        for ent in _ORDER_ENTITIES:
+            ent_typed: Entity = ent
             b_step_key = f"B_{ent}"
             if b_step_key in problems_by_step and ent_typed not in rerun_b_from_a:
                 combined_problem = " ; ".join(problems_by_step[b_step_key])
@@ -1165,15 +1387,21 @@ def infer_mapping(
                 mapping=mapping, steps=steps_log, errors=errors, issues=issues, canonical=canon
             )
 
+        order_chosen = {
+            ent: tname
+            for ent, tname in chosen_tables.items()
+            if ent not in _SIMPLE_ENTITY_SET
+        }
         mapping = _assemble_mapping(
             profile=profile,
             raw_by_name=raw_by_name,
-            chosen_tables=chosen_tables,
+            chosen_tables=order_chosen,
             orders_source=orders_source,
             entity_columns=entity_columns,
             status_map=status_map,
             walk_in_values=walk_in_values,
             return_rule=return_rule,
+            purchase_status_map={},
         )
         fresh_issues, canon = validate_mapping(raw, mapping)
         issues = [*dropped_notes, *fresh_issues]
@@ -1201,20 +1429,318 @@ def infer_mapping(
                     message=f"dropped {field_name}: {iss.message}",
                 )
             )
+        order_chosen = {
+            ent: tname
+            for ent, tname in chosen_tables.items()
+            if ent not in _SIMPLE_ENTITY_SET
+        }
         mapping = _assemble_mapping(
             profile=profile,
             raw_by_name=raw_by_name,
-            chosen_tables=chosen_tables,
+            chosen_tables=order_chosen,
             orders_source=orders_source,
             entity_columns=entity_columns,
             status_map=status_map,
             walk_in_values=walk_in_values,
             return_rule=return_rule,
+            purchase_status_map={},
         )
         fresh_issues, canon = validate_mapping(raw, mapping)
         issues = [*dropped_notes, *fresh_issues]
 
-    remaining_errs = [iss.message for iss in issues if iss.severity == "error"]
+    # ---- Order path is final. Later fields, then simple entities. ----
+
+    def _drop_simple_entity(ent: Entity, reason: str) -> None:
+        chosen_tables.pop(ent, None)
+        entity_columns.pop(ent, None)
+        if ent == "purchases":
+            purchase_status_map.clear()
+        dropped_notes.append(
+            Issue(
+                step=f"B_{ent}",
+                severity="warning",
+                message=f"dropped entity {ent}: {reason}",
+            )
+        )
+
+    def _run_later_fields() -> None:
+        for entity in ("orders", "customers"):
+            ent: Entity = entity  # type: ignore[assignment]
+            later = sorted(LATER_FIELDS.get(ent, frozenset()))
+            if not later:
+                continue
+            if ent == "customers" and ent not in chosen_tables:
+                continue
+            tname = _effective_table_for_entity(ent, chosen_tables, orders_source)
+            if tname is None:
+                continue
+            mapped = entity_columns.setdefault(ent, {})
+            rt = raw_by_name[tname]
+            free = _unmapped_raw_columns(rt, mapped)
+            if not free:
+                continue
+            tp = prof_by_name[tname]
+            variants = _build_later_fields_variants(
+                ent, later, tp, free, profile.readme_text
+            )
+            schema = _later_fields_schema(later, free)
+            try:
+                ans_later, log_later = _call_step(
+                    client=client,
+                    step_name=f"B_{ent}_later",
+                    prompt_variants=variants,
+                    schema=schema,
+                    schema_name=f"step_b_{ent}_later",
+                    budget=budget,
+                )
+                steps_log.append(log_later)
+            except LLMUnavailable:
+                raise
+            except LLMError as exc:
+                dropped_notes.append(
+                    Issue(
+                        step=f"B_{ent}_later",
+                        severity="warning",
+                        message=f"later fields skipped: {exc}",
+                    )
+                )
+                continue
+            free_set = set(free)
+            for fname in later:
+                raw_col = ans_later.get(fname)
+                if (
+                    isinstance(raw_col, str)
+                    and raw_col in free_set
+                    and raw_col not in mapped.values()
+                ):
+                    mapped[fname] = raw_col
+                    free_set.discard(raw_col)
+
+    def _run_step_b_simple(entity: Entity, repair_suffix: str | None = None) -> None:
+        tname = chosen_tables.get(entity)
+        if tname is None:
+            return
+        tp = prof_by_name[tname]
+        rt = raw_by_name[tname]
+        variants = _build_step_b_variants(
+            entity, tp, profile.readme_text, orders_source=orders_source
+        )
+        schema = _step_b_schema(entity, rt.columns, orders_source)
+        try:
+            ans_b, log_b = _call_step(
+                client=client,
+                step_name=f"B_{entity}",
+                prompt_variants=variants,
+                schema=schema,
+                schema_name=f"step_b_{entity}",
+                budget=budget,
+                repair_suffix=repair_suffix,
+                required_keys=_step_b_required_names(entity, orders_source) or None,
+            )
+            steps_log.append(log_b)
+            last_ans_b[entity] = ans_b
+        except LLMUnavailable:
+            raise
+        except LLMError as exc:
+            _drop_simple_entity(entity, f"LLMError: {exc}")
+            return
+
+        valid_cols = set(rt.columns)
+        cleaned: dict[str, str] = {}
+        for k, v in ans_b.items():
+            if isinstance(v, str) and v in valid_cols:
+                cleaned[k] = v
+        missing = _simple_missing_required(entity, cleaned)
+        if missing and repair_suffix is None:
+            prev_json = json.dumps(ans_b, ensure_ascii=False)
+            suffix = (
+                f"Previous answer: {prev_json}. Problem: missing required field(s) "
+                f"{missing}. Fix it or the entity will be dropped."
+            )
+            _run_step_b_simple(entity, repair_suffix=suffix)
+            return
+        if missing:
+            _drop_simple_entity(entity, f"missing required field(s) {missing}")
+            return
+        entity_columns[entity] = cleaned
+
+    def _run_purchase_status() -> None:
+        nonlocal purchase_status_map
+        if "purchases" not in chosen_tables:
+            purchase_status_map = {}
+            return
+        st_col = entity_columns.get("purchases", {}).get("status_raw")
+        if not st_col:
+            purchase_status_map = {}
+            return
+        rt = raw_by_name[chosen_tables["purchases"]]
+        n_distinct = _n_distinct_nonempty(rt, st_col)
+        if n_distinct > _STATUS_DISTINCT_LIMIT:
+            purchase_status_map = {}
+            dropped_notes.append(
+                Issue(
+                    step="C_purchases",
+                    severity="warning",
+                    message=(
+                        f"purchase status_raw has {n_distinct} distinct values > "
+                        f"{_STATUS_DISTINCT_LIMIT}; treating all as valid"
+                    ),
+                )
+            )
+            return
+        st_counts = _collect_distinct_counts(rt, st_col, limit=50)
+        if not st_counts:
+            purchase_status_map = {}
+            return
+        st_vals = [v for v, _ in st_counts]
+        variants = _build_purchase_status_variants(st_counts, profile.readme_text)
+        schema = _purchase_status_schema(st_vals)
+        try:
+            ans_ps, log_ps = _call_step(
+                client=client,
+                step_name="C_purchases",
+                prompt_variants=variants,
+                schema=schema,
+                schema_name="step_c_purchase_status_map",
+                budget=budget,
+            )
+            steps_log.append(log_ps)
+        except LLMUnavailable:
+            raise
+        except LLMError as exc:
+            purchase_status_map = {}
+            dropped_notes.append(
+                Issue(
+                    step="C_purchases",
+                    severity="warning",
+                    message=f"purchase status map skipped: {exc}",
+                )
+            )
+            return
+        valid_states = {"valid", "cancelled"}
+        purchase_status_map = {
+            k: v  # type: ignore[misc]
+            for k, v in ans_ps.items()
+            if isinstance(v, str) and v in valid_states
+        }
+
+    def _simple_entity_from_step(step: str) -> Entity | None:
+        if step == "C_purchases":
+            return "purchases"
+        if step.startswith("B_") and step[2:] in _SIMPLE_ENTITY_SET:
+            return step[2:]  # type: ignore[return-value]
+        return None
+
+    def _pick_field_to_drop(ent: Entity, fields: list[str]) -> str | None:
+        """Prefer dropping *_ts when paired with *_date; else a non-required field."""
+        req = SIMPLE_REQUIRED.get(ent, set())
+        ts_fields = [f for f in fields if f.endswith("_ts")]
+        date_fields = [f for f in fields if f.endswith("_date")]
+        if ts_fields and date_fields:
+            return ts_fields[0]
+        non_req = [f for f in fields if f not in req]
+        if non_req:
+            return non_req[-1]
+        return None
+
+    def _fields_from_both_map_message(message: str) -> list[str]:
+        # "{a} and {b} both map to ..." or "{a} and {b} and {c} both map to ..."
+        if " both map to " not in message:
+            return []
+        left = message.split(" both map to ", 1)[0]
+        return [p.strip() for p in left.split(" and ") if p.strip()]
+
+    def _apply_simple_drops_from_issues(cur_issues: list[Issue]) -> bool:
+        """Drop simple fields/entities so they never fail the mapping. Returns True if changed."""
+        changed = False
+        ents_to_drop: set[Entity] = set()
+        fields_to_drop: list[tuple[Entity, str, str]] = []
+
+        for iss in cur_issues:
+            ent_d = _simple_entity_from_step(iss.step)
+            if ent_d is None:
+                continue
+            if iss.step == "C_purchases" and iss.severity == "error":
+                ents_to_drop.add("purchases")
+                continue
+            if iss.drop_field and "." in iss.drop_field:
+                ent_name, field_name = iss.drop_field.split(".", 1)
+                if ent_name != ent_d:
+                    continue
+                req = SIMPLE_REQUIRED.get(ent_d, set())
+                if field_name in req or (
+                    ent_d == "drug_info"
+                    and field_name in {"active_ingredient", "is_prescription"}
+                    and not (
+                        set(entity_columns.get(ent_d, {})) - {field_name}
+                    ).intersection({"active_ingredient", "is_prescription"})
+                ):
+                    ents_to_drop.add(ent_d)
+                else:
+                    fields_to_drop.append((ent_d, field_name, iss.message))
+                continue
+            if iss.severity != "error":
+                continue
+            # Duplicate-column / other errors without drop_field.
+            both_fields = _fields_from_both_map_message(iss.message)
+            if both_fields:
+                pick = _pick_field_to_drop(ent_d, both_fields)
+                if pick is None:
+                    ents_to_drop.add(ent_d)
+                else:
+                    fields_to_drop.append((ent_d, pick, iss.message))
+                continue
+            # Unknown simple error: drop the entity rather than fail the shop.
+            ents_to_drop.add(ent_d)
+
+        for ent_d, field_name, reason in fields_to_drop:
+            if ent_d in ents_to_drop:
+                continue
+            cols = entity_columns.get(ent_d)
+            if cols is not None and field_name in cols:
+                cols.pop(field_name, None)
+                changed = True
+                dropped_notes.append(
+                    Issue(
+                        step=f"B_{ent_d}",
+                        severity="warning",
+                        message=f"dropped {field_name}: {reason}",
+                    )
+                )
+                if ent_d == "drug_info" and not (
+                    set(cols) & {"active_ingredient", "is_prescription"}
+                ):
+                    ents_to_drop.add(ent_d)
+                req = SIMPLE_REQUIRED.get(ent_d, set())
+                if field_name in req or (req and not req <= set(cols)):
+                    ents_to_drop.add(ent_d)
+        for ent_d in ents_to_drop:
+            if ent_d in chosen_tables:
+                _drop_simple_entity(ent_d, "validation error on simple entity")
+                changed = True
+        return changed
+
+    _run_later_fields()
+    for simple_ent in list(SIMPLE_ENTITIES):
+        if simple_ent in chosen_tables:
+            _run_step_b_simple(simple_ent)
+    _run_purchase_status()
+
+    mapping = _assemble_current()
+    fresh_issues, canon = validate_mapping(raw, mapping)
+    issues = [*dropped_notes, *fresh_issues]
+    for _ in range(3):
+        if not _apply_simple_drops_from_issues(issues):
+            break
+        mapping = _assemble_current()
+        fresh_issues, canon = validate_mapping(raw, mapping)
+        issues = [*dropped_notes, *fresh_issues]
+
+    remaining_errs = [
+        iss.message
+        for iss in issues
+        if iss.severity == "error" and _simple_entity_from_step(iss.step) is None
+    ]
     return InferResult(
         mapping=mapping,
         steps=steps_log,
