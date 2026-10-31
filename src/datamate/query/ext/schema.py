@@ -22,7 +22,6 @@ EXT_TOP_LEVEL_KEYS: tuple[str, ...] = (
     "n",
     "n_days",
     "date",
-    "unhandled_condition",
 )
 
 _BY_VALUES: tuple[str, ...] = ("qty_base", "revenue", "gross_profit")
@@ -82,7 +81,6 @@ def ext_parsed_schema(ctx: ShopContext, products: list[str]) -> dict[str, Any]:
             "n": {"type": ["integer", "null"]},
             "n_days": {"type": ["integer", "null"]},
             "date": _period_object(),
-            "unhandled_condition": {"type": "boolean"},
         },
         "required": list(EXT_TOP_LEVEL_KEYS),
         "additionalProperties": False,

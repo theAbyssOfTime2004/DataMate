@@ -10,6 +10,7 @@ import pytest
 
 from datamate.config import settings
 from datamate.query.ext.prompts import EXT_FEW_SHOT_SETS
+from datamate.query.ext.verify import VERIFY_FEW_SHOTS
 from datamate.query.prompts import FEW_SHOT_SETS
 
 
@@ -41,8 +42,11 @@ def test_few_shot_questions_stay_below_the_train_similarity_cutoff() -> None:
                 continue
             references.append(_normalise(json.loads(line)["question"]))
 
-    for group in (*FEW_SHOT_SETS, *EXT_FEW_SHOT_SETS):
-        for example in group:
-            left = _normalise(example.question)
-            closest = max(SequenceMatcher(None, left, right).ratio() for right in references)
-            assert closest < 0.80, f"{example.question!r} similarity {closest:.3f}"
+    examples = [
+        *(ex for group in (*FEW_SHOT_SETS, *EXT_FEW_SHOT_SETS) for ex in group),
+        *VERIFY_FEW_SHOTS,
+    ]
+    for example in examples:
+        left = _normalise(example.question)
+        closest = max(SequenceMatcher(None, left, right).ratio() for right in references)
+        assert closest < 0.80, f"{example.question!r} similarity {closest:.3f}"

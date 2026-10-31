@@ -9,7 +9,6 @@ from pydantic import TypeAdapter, ValidationError
 
 from datamate.query.convert import ConvertError, period_from_raw
 from datamate.query.ext.spec import (
-    FAMILIES_WITH_CATEGORY,
     ExtQuerySpec,
     NoneQuery,
     PriceIncreaseEffectQuery,
@@ -20,61 +19,16 @@ from datamate.query.ext.spec import (
     UnsoldProductsQuery,
 )
 from datamate.query.grounding import QuestionText
-from datamate.timeres.periods import PeriodExpr
+from datamate.timeres.periods import (
+    DayExpr,
+    PeriodExpr,
+    TodayExpr,
+    YesterdayExpr,
+)
 
 _SPEC_ADAPTER: TypeAdapter[ExtQuerySpec] = TypeAdapter(ExtQuerySpec)
 
-# Count-style wording (folded). List/name cues override toward "list".
-_COUNT_PHRASES = (
-    "bao nhieu",
-    "bnhiu",
-    "bn",
-    "dem",
-    "co bao nhieu",
-)
-_COUNT_WORDS = frozenset({"may", "dem"})
-_LIST_PHRASES = (
-    "liet ke",
-    "danh sach",
-    "ke ten",
-    "ten cac",
-    "nhung mat hang nao",
-    "mat hang nao",
-    "mon nao",
-    "cac mon nao",
-    "cac mat hang",
-)
-# Stock / purchase wording → family none until E4d.
-_STOCK_PHRASES = (
-    "ton kho",
-    "con lai trong kho",
-    "het hang",
-)
-_PURCHASE_PHRASES = (
-    "nhap hang",
-    "gia nhap",
-    "nha cung cap",
-)
-_STOCK_PURCHASE_REJECT = frozenset({"qty_sold", "top_products", "unsold_products"})
-
-_GROUP_WORDS = frozenset({"nhom", "loai"})
-# "gộp" alone is also in "lãi gộp"; require a grouping phrase.
-_GROUP_PHRASES = ("gop moi", "gop tat", "gop cac", "gop theo", "gop hang", "gop chung")
-_MONEY_WORDS = frozenset({"tien", "dthu"})
-_MONEY_PHRASES = ("doanh thu",)
-_PROFIT_WORDS = frozenset({"lai", "loi"})
-_DELIVERY_WORDS = frozenset({"giao", "ship"})
-_DELIVERY_PHRASES = ("van chuyen", "cho di", "giao hang")
-_E4A_ANSWER_FAMILIES = frozenset(
-    {
-        "qty_sold",
-        "top_products",
-        "unsold_products",
-        "products_in_min_orders",
-        "price_on_date",
-        "price_increase_effect",
-    }
-)
+_SINGLE_DAY_TYPES = (DayExpr, TodayExpr, YesterdayExpr)
 
 
 def to_ext_query_spec(
@@ -87,52 +41,22 @@ def to_ext_query_spec(
     if family is None or family == "none":
         return NoneQuery()
 
-    if parsed.get("unhandled_condition") is True:
-        return NoneQuery()
-
-    # Customer questions are not product families (E4b).
-    if text is not None and text.has_word("khach"):
-        if family == "products_in_min_orders":
-            return NoneQuery()
-        if family in {
-            "qty_sold",
-            "top_products",
-            "unsold_products",
-            "price_on_date",
-            "price_increase_effect",
-        } and _looks_like_customer_ranking(text):
-            return NoneQuery()
-
-    # Stock / purchase questions wait for E4d.
-    if text is not None and family in _STOCK_PURCHASE_REJECT and _has_stock_or_purchase_cue(
-        text
-    ):
-        return NoneQuery()
-
-    if text is not None and family in _E4A_ANSWER_FAMILIES and _has_delivery_cue(text):
-        return NoneQuery()
-
     product = _optional_str(parsed.get("product"))
     category = _optional_str(parsed.get("category"))
-    if (
-        family in FAMILIES_WITH_CATEGORY
-        and text is not None
-        and _has_group_cue(text)
-        and product is None
-        and category is None
-    ):
-        return NoneQuery()
+    if category is not None:
+        grounded = text is None or text.mentions_value(category)
+        if product is not None:
+            # Product already pins the item (or category is stray) — drop category.
+            category = None
+        elif not grounded:
+            return NoneQuery()
 
     if family == "qty_sold":
-        if text is not None and _has_money_cue(text):
-            return NoneQuery()
         period = _need_period(parsed.get("period"), as_of, "period")
         base_unit = _optional_str(parsed.get("base_unit"))
         size = _optional_size(parsed.get("size"))
         if product is not None:
             _require_grounded_product(text, product)
-        if category is not None:
-            _require_grounded_category(text, category)
         try:
             return QtySoldQuery(
                 product=product,
@@ -153,33 +77,19 @@ def to_ext_query_spec(
             raise ConvertError(f"top_products by must be qty_base|revenue|gross_profit, got {by!r}")
         if mode not in {"max", "min"}:
             raise ConvertError(f"top_products mode must be max|min, got {mode!r}")
-        if text is not None:
-            if by == "qty_base" and _has_money_cue(text):
-                return NoneQuery()
-            has_profit = _has_profit_cue(text)
-            if by == "gross_profit" and not has_profit:
-                return NoneQuery()
-            if has_profit and by != "gross_profit":
-                return NoneQuery()
-        if category is not None:
-            _require_grounded_category(text, category)
         return TopProductsQuery(
             k=k, by=by, mode=mode, category=category, size=size, period=period
         )  # type: ignore[arg-type]
     if family == "unsold_products":
         period = _need_period(parsed.get("period"), as_of, "period")
-        output = _resolve_count_or_list(parsed.get("output"), text)
-        if category is not None:
-            _require_grounded_category(text, category)
+        output = _resolve_count_or_list(parsed.get("output"))
         return UnsoldProductsQuery(
             output=output, category=category, period=period
         )  # type: ignore[arg-type]
     if family == "products_in_min_orders":
         period = _need_period(parsed.get("period"), as_of, "period")
         n = _need_int(parsed.get("n"), "n")
-        output = _resolve_count_or_list(parsed.get("output"), text)
-        if category is not None:
-            _require_grounded_category(text, category)
+        output = _resolve_count_or_list(parsed.get("output"))
         return ProductsInMinOrdersQuery(
             n=n, output=output, category=category, period=period
         )  # type: ignore[arg-type]
@@ -187,84 +97,41 @@ def to_ext_query_spec(
         if product is None:
             raise ConvertError("price_on_date needs product")
         _require_grounded_product(text, product)
-        date = _need_period(parsed.get("date"), as_of, "date")
+        date = _single_day_from(parsed.get("date"), as_of) or _single_day_from(
+            parsed.get("period"), as_of
+        )
+        if date is None:
+            raise ConvertError("price_on_date needs a single day in date or period")
         return PriceOnDateQuery(product=product, date=date)
     if family == "price_increase_effect":
         if product is None:
             raise ConvertError("price_increase_effect needs product")
         _require_grounded_product(text, product)
         n_days = _need_int(parsed.get("n_days"), "n_days")
-        raw_date = parsed.get("date")
-        date = period_from_raw(raw_date, as_of) if raw_date is not None else None
+        date = _single_day_from(parsed.get("date"), as_of) or _single_day_from(
+            parsed.get("period"), as_of
+        )
         return PriceIncreaseEffectQuery(product=product, n_days=n_days, date=date)
     raise ConvertError(f"unknown family {family!r}")
 
 
-def _resolve_count_or_list(raw: object, text: QuestionText | None) -> str:
-    """Count unless the question asks to list or name the items."""
-    if text is not None and _wants_list(text):
-        return "list"
-    if text is not None and _wants_count(text):
-        return "count"
+def _resolve_count_or_list(raw: object) -> str:
+    """Trust the parser's output field; default to count when missing."""
     if raw in {"count", "list"}:
         return str(raw)
     return "count"
 
 
-def _wants_list(text: QuestionText) -> bool:
-    return any(text.has_phrase(p) for p in _LIST_PHRASES)
-
-
-def _wants_count(text: QuestionText) -> bool:
-    if any(text.has_phrase(p) for p in _COUNT_PHRASES):
-        return True
-    if any(text.has_word(w) for w in _COUNT_WORDS):
-        return True
-    # "số ... là" without an explicit list/name cue
-    return text.has_word("so") and text.has_word("la")
-
-
-def _looks_like_customer_ranking(text: QuestionText) -> bool:
-    return text.has_phrase("mua nhieu") or text.has_phrase("nhieu nhat") or text.has_phrase(
-        "tu "
-    )
-
-
-def _has_stock_or_purchase_cue(text: QuestionText) -> bool:
-    return any(text.has_phrase(p) for p in _STOCK_PHRASES) or any(
-        text.has_phrase(p) for p in _PURCHASE_PHRASES
-    )
-
-
-def _has_group_cue(text: QuestionText) -> bool:
-    if any(text.has_word(w) for w in _GROUP_WORDS):
-        return True
-    if any(text.has_phrase(p) for p in _GROUP_PHRASES):
-        return True
-    # "dòng" / "hãng" keep diacritics so they do not collide with đồng / hàng.
-    return any(word in {"dòng", "hãng"} for word in text._marked)
-
-
-def _has_money_cue(text: QuestionText) -> bool:
-    if any(text.has_word(w) for w in _MONEY_WORDS):
-        return True
-    if any(text.has_phrase(p) for p in _MONEY_PHRASES):
-        return True
-    if any(text.has_word(w) for w in _PROFIT_WORDS):
-        return True
-    return any(word == "đồng" for word in text._marked)
-
-
-def _has_profit_cue(text: QuestionText) -> bool:
-    return any(text.has_word(w) for w in _PROFIT_WORDS)
-
-
-def _has_delivery_cue(text: QuestionText) -> bool:
-    if any(text.has_word(w) for w in _DELIVERY_WORDS):
-        return True
-    if any(text.has_phrase(p) for p in _DELIVERY_PHRASES):
-        return True
-    return any(word == "chở" for word in text._marked)
+def _single_day_from(raw: object, as_of: datetime.date) -> PeriodExpr | None:
+    if raw is None:
+        return None
+    try:
+        expr = period_from_raw(raw, as_of)
+    except ConvertError:
+        return None
+    if isinstance(expr, _SINGLE_DAY_TYPES):
+        return expr
+    return None
 
 
 def _require_grounded_product(text: QuestionText | None, product: str) -> None:
@@ -272,13 +139,6 @@ def _require_grounded_product(text: QuestionText | None, product: str) -> None:
         return
     if not text.mentions_product(product):
         raise ConvertError(f"product {product!r} is not grounded in the question")
-
-
-def _require_grounded_category(text: QuestionText | None, category: str) -> None:
-    if text is None:
-        return
-    if not text.mentions_value(category):
-        raise ConvertError(f"category {category!r} is not grounded in the question")
 
 
 def _need_period(raw: object, as_of: datetime.date, label: str) -> PeriodExpr:

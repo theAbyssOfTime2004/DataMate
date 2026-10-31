@@ -604,3 +604,104 @@ def test_live_vllm_smoke(tmp_path: Path) -> None:
         assert out["answer"] == 5
     finally:
         client.close()
+
+
+def test_chat_choice_probs_renormalise_and_cache(tmp_path: Path) -> None:
+    import math
+
+    calls: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(json.loads(request.content.decode("utf-8")))
+        yes_lp = math.log(0.7)
+        no_lp = math.log(0.2)
+        other_lp = math.log(0.1)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": "yes"},
+                        "logprobs": {
+                            "content": [
+                                {
+                                    "token": "yes",
+                                    "logprob": yes_lp,
+                                    "top_logprobs": [
+                                        {"token": "yes", "logprob": yes_lp},
+                                        {"token": "no", "logprob": no_lp},
+                                        {"token": "maybe", "logprob": other_lp},
+                                    ],
+                                }
+                            ]
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 1},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = LLMClient(
+        base_url="http://mock-server:8000/v1",
+        model="qwen3-4b",
+        api_key="SECRET",
+        seed=20261116,
+        cache_dir=tmp_path,
+        cache_enabled=True,
+        transport=transport,
+    )
+    messages = [{"role": "user", "content": "yes or no?"}]
+    probs = client.chat_choice_probs(messages, ["yes", "no"])
+    assert abs(probs["yes"] - 0.7 / 0.9) < 1e-9
+    assert abs(probs["no"] - 0.2 / 0.9) < 1e-9
+    assert abs(probs["yes"] + probs["no"] - 1.0) < 1e-9
+    assert calls[0]["guided_choice"] == ["yes", "no"]
+    assert calls[0]["logprobs"] is True
+    assert calls[0]["max_tokens"] == 1
+
+    # Cache hit
+    probs2 = client.chat_choice_probs(messages, ["yes", "no"])
+    assert probs2 == probs
+    assert len(calls) == 1
+    assert client.usage_log[1].cache_hit is True
+    client.close()
+
+
+def test_chat_choice_probs_missing_choice_is_zero(tmp_path: Path) -> None:
+    import math
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": "yes"},
+                        "logprobs": {
+                            "content": [
+                                {
+                                    "token": "yes",
+                                    "logprob": math.log(1.0),
+                                    "top_logprobs": [
+                                        {"token": "yes", "logprob": math.log(1.0)},
+                                    ],
+                                }
+                            ]
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+            },
+        )
+
+    client = LLMClient(
+        base_url="http://mock:8000/v1",
+        cache_dir=tmp_path,
+        cache_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    probs = client.chat_choice_probs([{"role": "user", "content": "x"}], ["yes", "no"])
+    assert probs["yes"] == 1.0
+    assert probs["no"] == 0.0
+    client.close()

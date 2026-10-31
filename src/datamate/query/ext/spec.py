@@ -116,7 +116,3 @@ E4A_FAMILIES: tuple[str, ...] = (
     "price_on_date",
     "price_increase_effect",
 )
-
-FAMILIES_WITH_CATEGORY: frozenset[str] = frozenset(
-    {"qty_sold", "top_products", "unsold_products", "products_in_min_orders"}
-)

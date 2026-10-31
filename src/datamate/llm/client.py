@@ -181,6 +181,150 @@ class LLMClient:
             raise LLMError(f"LLM JSON response missing required keys {missing}: {filled}")
         return filled
 
+    def chat_choice_probs(
+        self,
+        messages: list[dict[str, str]],
+        choices: list[str],
+    ) -> dict[str, float]:
+        """Return renormalised probabilities over `choices` from the first token.
+
+        Uses vLLM ``guided_choice`` when available; falls back to a one-key JSON enum
+        schema. A choice missing from top_logprobs gets probability 0.
+        """
+        if not choices:
+            raise LLMError("chat_choice_probs requires a non-empty choices list")
+        if len(set(choices)) != len(choices):
+            raise LLMError(f"chat_choice_probs choices must be unique: {choices!r}")
+
+        resolved_max_tokens = 1
+        key, canonical_req = self._compute_choice_cache_key(messages, choices, resolved_max_tokens)
+
+        t0 = time.perf_counter()
+        cached = self._read_cache(key)
+        if cached is not None and "choice_probs" in cached:
+            latency_s = time.perf_counter() - t0
+            usage = cached.get("usage", {})
+            self.usage_log.append(
+                UsageEntry(
+                    cache_hit=True,
+                    prompt_tokens=int(usage.get("prompt_tokens", 0)),
+                    completion_tokens=int(usage.get("completion_tokens", 0)),
+                    latency_s=latency_s,
+                )
+            )
+            raw = cached["choice_probs"]
+            return {c: float(raw.get(c, 0.0)) for c in choices}
+
+        url = f"{self.base_url}/chat/completions"
+        body: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0,
+            "seed": self.seed,
+            "max_tokens": resolved_max_tokens,
+            "logprobs": True,
+            "top_logprobs": 20,
+            "guided_choice": list(choices),
+        }
+        if self.disable_thinking:
+            body["chat_template_kwargs"] = {"enable_thinking": False}
+
+        resp, retried = self._post_with_timeout_retry(
+            url,
+            body,
+            started=t0,
+            error_prefix=f"HTTP transport error calling {url}",
+        )
+
+        if resp.status_code == 400 and "guided_choice" in resp.text:
+            enum_schema = {
+                "type": "object",
+                "properties": {"choice": {"type": "string", "enum": list(choices)}},
+                "required": ["choice"],
+                "additionalProperties": False,
+            }
+            fallback_body = {
+                k: v for k, v in body.items() if k != "guided_choice"
+            }
+            fallback_body["max_tokens"] = 8
+            fallback_body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "ChoiceAnswer",
+                    "schema": enum_schema,
+                    "strict": True,
+                },
+            }
+            resp, fallback_retried = self._post_with_timeout_retry(
+                url,
+                fallback_body,
+                started=t0,
+                error_prefix="HTTP transport error on choice-schema retry",
+            )
+            retried = retried or fallback_retried
+
+        if resp.status_code >= 500 or resp.status_code in _UNAVAILABLE_STATUS:
+            raise LLMUnavailable(f"LLM server error (HTTP {resp.status_code}): {resp.text}")
+        if resp.status_code != 200:
+            raise LLMError(f"LLM server error (HTTP {resp.status_code}): {resp.text}")
+
+        try:
+            data = resp.json()
+            choice0 = data["choices"][0]
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            raise LLMError(f"Unexpected completion payload structure: {resp.text}") from exc
+
+        probs = _probs_from_logprobs(choice0, choices)
+
+        raw_usage = data.get("usage") or {}
+        prompt_tokens = int(raw_usage.get("prompt_tokens", 0))
+        completion_tokens = int(raw_usage.get("completion_tokens", 0))
+        latency_s = time.perf_counter() - t0
+
+        self.usage_log.append(
+            UsageEntry(
+                cache_hit=False,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                latency_s=latency_s,
+                retried=retried,
+            )
+        )
+
+        cache_record = {
+            "request": canonical_req,
+            "choice_probs": probs,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            },
+        }
+        self._write_cache_atomic(key, cache_record)
+        return probs
+
+    def _compute_choice_cache_key(
+        self,
+        messages: list[dict[str, str]],
+        choices: list[str],
+        max_tokens: int,
+    ) -> tuple[str, dict[str, Any]]:
+        canonical_req: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "choices": list(choices),
+            "temperature": 0,
+            "seed": self.seed,
+            "max_tokens": max_tokens,
+            "logprobs": True,
+            "top_logprobs": 20,
+            "mode": "chat_choice_probs",
+        }
+        if self.disable_thinking:
+            canonical_req["chat_template_kwargs"] = {"enable_thinking": False}
+        dumped = json.dumps(canonical_req, sort_keys=True, ensure_ascii=False)
+        key = hashlib.sha256(dumped.encode("utf-8")).hexdigest()
+        return key, canonical_req
+
     def chat_json(
         self,
         messages: list[dict[str, str]],
@@ -357,11 +501,89 @@ class LLMClient:
         return count
 
 
+def _probs_from_logprobs(choice0: dict[str, Any], choices: list[str]) -> dict[str, float]:
+    """Renormalise first-token top_logprobs over `choices` (missing -> 0)."""
+    logprobs = choice0.get("logprobs") or {}
+    content = logprobs.get("content")
+    if not isinstance(content, list) or not content:
+        # JSON-enum fallback: parse the message and put mass 1 on that choice.
+        message = (choice0.get("message") or {}).get("content")
+        picked = _choice_from_message(message, choices)
+        if picked is None:
+            raise LLMError(f"completion has no logprobs and no choice token: {choice0!r}")
+        return {c: (1.0 if c == picked else 0.0) for c in choices}
+
+    first = content[0]
+    if not isinstance(first, dict):
+        raise LLMError(f"unexpected logprobs content entry: {first!r}")
+    top = first.get("top_logprobs")
+    if not isinstance(top, list):
+        top = []
+        token = first.get("token")
+        logprob = first.get("logprob")
+        if isinstance(token, str) and isinstance(logprob, (int, float)):
+            top = [{"token": token, "logprob": float(logprob)}]
+
+    # Tokenizer-free single-token check: every returned token string that matches a
+    # choice must equal that choice exactly (no multi-token fragments).
+    token_logprob: dict[str, float] = {}
+    for entry in top:
+        if not isinstance(entry, dict):
+            continue
+        token = entry.get("token")
+        logprob = entry.get("logprob")
+        if not isinstance(token, str) or not isinstance(logprob, (int, float)):
+            continue
+        cleaned = token.lstrip()
+        if cleaned in choices:
+            if cleaned != token and token.strip() != cleaned:
+                raise LLMError(
+                    f"choice {cleaned!r} appeared as multi-piece token {token!r}; "
+                    "choices must be single tokens for the served model"
+                )
+            prev = token_logprob.get(cleaned)
+            if prev is None or float(logprob) > prev:
+                token_logprob[cleaned] = float(logprob)
+
+    raw_token = first.get("token")
+    if isinstance(raw_token, str):
+        cleaned_raw = raw_token.lstrip()
+        if cleaned_raw not in choices and not token_logprob:
+            raise LLMError(
+                f"first token {raw_token!r} is not a listed choice {choices!r} "
+                "and no choice appears in top_logprobs (choices must be single tokens)"
+            )
+
+    weights = {c: (math.exp(token_logprob[c]) if c in token_logprob else 0.0) for c in choices}
+    total = sum(weights.values())
+    if total <= 0.0:
+        return {c: 0.0 for c in choices}
+    return {c: weights[c] / total for c in choices}
+
+
+def _choice_from_message(content: object, choices: list[str]) -> str | None:
+    if not isinstance(content, str):
+        return None
+    text = _strip_think_blocks(content).strip()
+    if text in choices:
+        return text
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(parsed, dict):
+        value = parsed.get("choice")
+        if isinstance(value, str) and value in choices:
+            return value
+    return None
+
+
 def _strip_think_blocks(content: str) -> str:
     """Remove Qwen3 hybrid-thinking ``<think>...</think>`` prefixes before JSON parse."""
     if "<think>" not in content.casefold():
         return content
     return _THINK_BLOCK_RE.sub("", content).lstrip()
+
 
 
 def _parse_llm_json(content: str, finish_reason: str | None) -> Any:

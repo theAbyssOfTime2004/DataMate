@@ -65,7 +65,14 @@ def main(argv: list[str] | None = None) -> int:
 
     # family -> counters
     stats: dict[str, dict[str, int]] = defaultdict(
-        lambda: {"n": 0, "answered": 0, "correct": 0, "wrong": 0, "abstain": 0}
+        lambda: {
+            "n": 0,
+            "answered": 0,
+            "correct": 0,
+            "wrong": 0,
+            "abstain": 0,
+            "verify_abstain": 0,
+        }
     )
 
     logs_dir = run_dir / "logs"
@@ -86,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
         ans_type = submitted.get("type")
         if ans_type in (None, "abstain"):
             row["abstain"] += 1
+            if trace.get("abstain_reason") == "ext_verify_low":
+                row["verify_abstain"] += 1
             continue
         row["answered"] += 1
         points = score_one(submitted, ref)
@@ -97,7 +106,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"run: {run_dir}")
     print(f"split={args.split} subset={args.subset}")
     print()
-    header = f"{'family':<28} {'n':>5} {'ans':>5} {'ok':>5} {'wrong':>5} {'abs':>5} {'prec':>7}"
+    header = (
+        f"{'family':<28} {'n':>5} {'ans':>5} {'ok':>5} {'wrong':>5} {'abs':>5} "
+        f"{'v_abs':>5} {'prec':>7}"
+    )
     print(header)
     print("-" * len(header))
     order = sorted(stats.keys(), key=lambda k: (k != "main_path", k))
@@ -108,9 +120,10 @@ def main(argv: list[str] | None = None) -> int:
         prec_s = f"{prec:.3f}" if answered else "—"
         print(
             f"{name:<28} {row['n']:>5} {answered:>5} {row['correct']:>5} "
-            f"{row['wrong']:>5} {row['abstain']:>5} {prec_s:>7}"
+            f"{row['wrong']:>5} {row['abstain']:>5} {row['verify_abstain']:>5} {prec_s:>7}"
         )
     return 0
+
 
 
 if __name__ == "__main__":

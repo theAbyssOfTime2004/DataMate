@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     direct_prompt_budget_tokens: int = 6600
     # Extension families that may answer when the main parser is out of scope.
     enabled_families: list[str] = Field(default_factory=_default_enabled_families)
+    # Ext verifier (E4a-fix4): p_yes >= threshold to compute. Default 0.5 until
+    # evals/ext_threshold.py picks a value from train/dev (never from public).
+    ext_verify_threshold: float = 0.5
+    # Verifier prompt with the balanced few-shot set (False = instruction only).
+    ext_verify_few_shot: bool = True
 
     @field_validator("cache_dir", "runs_dir", mode="after")
     @classmethod

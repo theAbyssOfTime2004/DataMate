@@ -625,88 +625,25 @@ def test_null_qty_base_and_missing_product_abstain(tmp_path: Path) -> None:
     con.close()
 
 
-def test_count_vs_list_convert() -> None:
+def test_count_vs_list_trusts_parser_output() -> None:
     from datamate.query.ext.convert import to_ext_query_spec
-    from datamate.query.parse_schema import PERIOD_FIELDS
 
     as_of = datetime.date(2026, 6, 30)
-    full_period = {name: None for name in PERIOD_FIELDS}
-    full_period.update({"kind": "month", "month": 6, "year": 2026})
+    full_period = _ext_period(kind="month", month=6, year=2026)
 
     count_q = to_ext_query_spec(
-        {
-            "family": "unsold_products",
-            "output": "list",  # LLM said list; question asks how many
-            "period": full_period,
-        },
+        {"family": "unsold_products", "output": "count", "period": full_period},
         as_of,
-        "Thang 6 dem so mon khong ai mua la bao nhieu",
+        "Thang 6 dem so mon khong ai mua",
     )
-    assert count_q.family == "unsold_products"
     assert count_q.output == "count"  # type: ignore[attr-defined]
 
     list_q = to_ext_query_spec(
-        {
-            "family": "unsold_products",
-            "output": "count",
-            "period": full_period,
-        },
+        {"family": "unsold_products", "output": "list", "period": full_period},
         as_of,
         "Ke ten cac mon khong ai mua thang 6",
     )
     assert list_q.output == "list"  # type: ignore[attr-defined]
-
-
-
-def test_customer_question_rejects_products_in_min_orders() -> None:
-    from datamate.query.ext.convert import to_ext_query_spec
-    from datamate.query.ext.spec import NoneQuery
-    from datamate.query.parse_schema import PERIOD_FIELDS
-
-    as_of = datetime.date(2026, 6, 30)
-    full_period = {name: None for name in PERIOD_FIELDS}
-    full_period.update({"kind": "month_this"})
-    spec = to_ext_query_spec(
-        {
-            "family": "products_in_min_orders",
-            "n": 5,
-            "output": "count",
-            "period": full_period,
-        },
-        as_of,
-        "Khach mua tu 5 don tro len thang nay co bao nhieu nguoi",
-    )
-    assert isinstance(spec, NoneQuery)
-
-
-def test_stock_and_purchase_cues_reject_qty_sold() -> None:
-    from datamate.query.ext.convert import to_ext_query_spec
-    from datamate.query.ext.spec import NoneQuery
-    from datamate.query.parse_schema import PERIOD_FIELDS
-
-    as_of = datetime.date(2026, 6, 30)
-    full_period = {name: None for name in PERIOD_FIELDS}
-    full_period.update({"kind": "today"})
-    stock = to_ext_query_spec(
-        {
-            "family": "qty_sold",
-            "product": "Sữa tươi",
-            "period": full_period,
-        },
-        as_of,
-        "Ton kho Sua tuoi cuoi ngay hom nay la bao nhieu goi",
-    )
-    assert isinstance(stock, NoneQuery)
-    purchase = to_ext_query_spec(
-        {
-            "family": "qty_sold",
-            "product": "Bánh quy",
-            "period": full_period,
-        },
-        as_of,
-        "Gia nhap binh quan Banh quy thang nay la bao nhieu",
-    )
-    assert isinstance(purchase, NoneQuery)
 
 
 def _ext_period(**fields: object) -> dict[str, object]:
@@ -717,133 +654,110 @@ def _ext_period(**fields: object) -> dict[str, object]:
     return row
 
 
-def test_unhandled_and_condition_guards() -> None:
+def test_convert_drops_category_with_product_and_day_from_period() -> None:
     from datamate.query.ext.convert import to_ext_query_spec
-    from datamate.query.ext.spec import NoneQuery, TopProductsQuery
+    from datamate.query.ext.spec import NoneQuery, PriceOnDateQuery, QtySoldQuery
 
     as_of = datetime.date(2026, 6, 30)
     period = _ext_period(kind="month_this")
-
-    assert isinstance(
-        to_ext_query_spec(
-            {
-                "family": "qty_sold",
-                "product": "Sữa tươi",
-                "period": period,
-                "unhandled_condition": True,
-            },
-            as_of,
-            "ban Sua tuoi thang nay bao nhieu",
-        ),
-        NoneQuery,
-    )
-    # Group cue without category/product.
-    assert isinstance(
-        to_ext_query_spec(
-            {
-                "family": "qty_sold",
-                "base_unit": "hộp",
-                "period": period,
-            },
-            as_of,
-            "Sua bot so 4 gop moi hang thang nay ban bao nhieu hop",
-        ),
-        NoneQuery,
-    )
-    assert isinstance(
-        to_ext_query_spec(
-            {
-                "family": "qty_sold",
-                "base_unit": "ly",
-                "period": period,
-            },
-            as_of,
-            "Dòng máy bán được bao nhiêu ly tháng này",
-        ),
-        NoneQuery,
-    )
-    # Money asked but quantity family / qty_base ranking.
-    assert isinstance(
-        to_ext_query_spec(
-            {
-                "family": "qty_sold",
-                "product": "Trà xanh",
-                "period": period,
-            },
-            as_of,
-            "Thang nay ban duoc bao nhieu tien Tra xanh",
-        ),
-        NoneQuery,
-    )
-    assert isinstance(
-        to_ext_query_spec(
-            {
-                "family": "top_products",
-                "k": 1,
-                "by": "qty_base",
-                "mode": "max",
-                "period": period,
-            },
-            as_of,
-            "Mon mang ve nhieu tien nhat thang nay",
-        ),
-        NoneQuery,
-    )
-    # Delivery.
-    assert isinstance(
-        to_ext_query_spec(
-            {
-                "family": "qty_sold",
-                "product": "Trà xanh",
-                "period": period,
-            },
-            as_of,
-            "Toi hom nay da giao bao nhieu Tra xanh",
-        ),
-        NoneQuery,
-    )
-    # gross_profit requires a profit cue; reverse too.
-    assert isinstance(
-        to_ext_query_spec(
-            {
-                "family": "top_products",
-                "k": 1,
-                "by": "gross_profit",
-                "mode": "max",
-                "period": period,
-            },
-            as_of,
-            "Mon ban chay nhat thang nay",
-        ),
-        NoneQuery,
-    )
-    assert isinstance(
-        to_ext_query_spec(
-            {
-                "family": "top_products",
-                "k": 1,
-                "by": "revenue",
-                "mode": "max",
-                "period": period,
-            },
-            as_of,
-            "Mon lai gop cao nhat thang nay",
-        ),
-        NoneQuery,
-    )
-    ok = to_ext_query_spec(
+    both = to_ext_query_spec(
         {
-            "family": "top_products",
-            "k": 1,
-            "by": "gross_profit",
-            "mode": "max",
+            "family": "qty_sold",
+            "product": "Trà xanh",
+            "category": "đồ uống",
             "period": period,
         },
         as_of,
-        "Mon lai gop cao nhat thang nay",
+        "Thang nay ban bao nhieu Tra xanh trong nhom do uong",
     )
-    assert isinstance(ok, TopProductsQuery)
-    assert ok.by == "gross_profit"
+    assert isinstance(both, QtySoldQuery)
+    assert both.product == "Trà xanh"
+    assert both.category is None
+
+    ungrounded = to_ext_query_spec(
+        {
+            "family": "qty_sold",
+            "base_unit": "gói",
+            "category": "đồ uống",
+            "period": period,
+        },
+        as_of,
+        "Thang nay ban bao nhieu goi",
+    )
+    assert isinstance(ungrounded, NoneQuery)
+
+    day = to_ext_query_spec(
+        {
+            "family": "price_on_date",
+            "product": "Trà xanh",
+            "period": _ext_period(kind="today"),
+            "date": None,
+        },
+        as_of,
+        "Hom nay Tra xanh gia bao nhieu",
+    )
+    assert isinstance(day, PriceOnDateQuery)
+
+
+def test_describe_ext_spec_each_family() -> None:
+    from datamate.query.ext.describe import describe_ext_spec
+    from datamate.query.ext.spec import (
+        PriceIncreaseEffectQuery,
+        PriceOnDateQuery,
+        ProductsInMinOrdersQuery,
+        QtySoldQuery,
+        TopProductsQuery,
+        UnsoldProductsQuery,
+    )
+    from datamate.timeres import DayExpr, MonthExpr
+
+    rules = RuleConfig()
+    cal = LunarCalendar({})
+    as_of = datetime.date(2026, 6, 30)
+    june = MonthExpr(month=6, year=2026)
+
+    qty = describe_ext_spec(
+        QtySoldQuery(product="Gạo ST25", period=june), as_of, rules, cal
+    )
+    assert 'products: "Gạo ST25"' in qty
+    assert "units sold" in qty
+    assert "2026-06-01 .. 2026-06-30" in qty
+    assert "not filtered by: delivery status" in qty
+
+    top = describe_ext_spec(
+        TopProductsQuery(k=3, by="revenue", mode="max", category="Gạo", period=june),
+        as_of,
+        rules,
+        cal,
+    )
+    assert 'category "Gạo"' in top
+    assert "money revenue" in top
+    assert "top 3 names" in top
+
+    unsold = describe_ext_spec(
+        UnsoldProductsQuery(output="count", period=june), as_of, rules, cal
+    )
+    assert "count of names" in unsold
+
+    min_o = describe_ext_spec(
+        ProductsInMinOrdersQuery(n=2, output="list", period=june), as_of, rules, cal
+    )
+    assert "at least 2" in min_o
+    assert "list of names" in min_o
+
+    price = describe_ext_spec(
+        PriceOnDateQuery(product="Gạo ST25", date=DayExpr(date=datetime.date(2026, 6, 1))),
+        as_of,
+        rules,
+        cal,
+    )
+    assert "selling price of one" in price
+
+    effect = describe_ext_spec(
+        PriceIncreaseEffectQuery(product="Gạo ST25", n_days=5), as_of, rules, cal
+    )
+    assert "percent change" in effect
+    assert "5 days" in effect
 
 
 def test_category_filter_on_qty_and_top(tmp_path: Path) -> None:

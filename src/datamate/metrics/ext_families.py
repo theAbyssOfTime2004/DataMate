@@ -529,3 +529,39 @@ def _ext_recorded(engine: MetricEngine, table: str, column: str) -> bool:
         present = False
     engine._present[key] = present
     return present
+
+
+def product_base_unit(engine: MetricEngine, product: str) -> str | None:
+    """Base unit of a named product (None when unknown).
+
+    products.base_unit first; else the line unit whose quantity equals qty_base; else the
+    product's only line unit.
+    """
+    keys = _product_keys(engine, product)
+    if not keys:
+        return None
+    marks = ", ".join("?" for _ in keys)
+    params = sorted(keys)
+    queries = (
+        (
+            f"SELECT base_unit FROM products WHERE product_key IN ({marks}) "
+            "AND base_unit IS NOT NULL AND base_unit <> '' LIMIT 1"
+        ),
+        (
+            f"SELECT unit FROM order_lines WHERE product_key IN ({marks}) "
+            "AND unit IS NOT NULL AND unit <> '' AND qty_base IS NOT NULL AND qty_base = qty "
+            "GROUP BY unit ORDER BY COUNT(*) DESC, unit LIMIT 1"
+        ),
+        (
+            f"SELECT MIN(unit) FROM order_lines WHERE product_key IN ({marks}) "
+            "AND unit IS NOT NULL AND unit <> '' HAVING COUNT(DISTINCT unit) = 1"
+        ),
+    )
+    for sql in queries:
+        try:
+            row = engine.con.execute(sql, params).fetchone()
+        except Exception:  # noqa: BLE001, S112 — minimal fixtures may lack these columns
+            continue
+        if row is not None and row[0] is not None and str(row[0]).strip():
+            return str(row[0]).strip()
+    return None

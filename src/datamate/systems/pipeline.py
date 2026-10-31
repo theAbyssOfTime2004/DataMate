@@ -19,8 +19,10 @@ from datamate.io.raw import BusinessRaw, load_business_cached
 from datamate.llm import LLMUnavailable, get_client
 from datamate.mapping import Mapping, infer_mapping, mapping_fingerprint
 from datamate.metrics import MetricEngine
+from datamate.metrics.ext_families import product_base_unit
 from datamate.query.context import ShopContext, load_shop_context
 from datamate.query.ext import parse_ext_question
+from datamate.query.ext.verify import verify_ext_spec
 from datamate.query.parse import ParseAttempt, parse_question
 from datamate.query.spec import (
     ArgMaxQuery,
@@ -219,10 +221,34 @@ class PipelineSystem:
             trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
             return Answer.abstain(), trace
         trace["spec"] = ext.spec.model_dump(mode="json")
+        verify_t0 = time.perf_counter()
+        product = getattr(ext.spec, "product", None)
+        product_unit = None
+        if product:
+            with bundle.lock:
+                product_unit = product_base_unit(bundle.engine, product)
+        p_yes, description = verify_ext_spec(
+            question.question,
+            ext.spec,
+            self.client,
+            bundle.rules,
+            bundle.calendar,
+            question.as_of_date,
+            product_unit=product_unit,
+        )
+        trace["timings"]["ext_verify_s"] = round(time.perf_counter() - verify_t0, 6)
+        trace["ext_verify_p"] = round(p_yes, 4)
+        trace["ext_verify_description"] = description
+        if p_yes < settings.ext_verify_threshold:
+            trace["abstain_reason"] = "ext_verify_low"
+            trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
+            return Answer.abstain(), trace
         engine_t0 = time.perf_counter()
         with bundle.lock:
             answer = bundle.engine.answer_ext(ext.spec, question.as_of_date)
         trace["timings"]["engine_s"] = round(time.perf_counter() - engine_t0, 6)
+        # Logged for ext_threshold.py when the run uses a low threshold.
+        trace["ext_answer"] = answer.model_dump(mode="json")
         if answer.type == "abstain":
             trace["abstain_reason"] = "engine_abstain"
         elif answer.type == "unanswerable":
