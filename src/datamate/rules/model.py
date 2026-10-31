@@ -45,6 +45,13 @@ class RuleConfig(BaseModel):
     percent_decimals: int = 2
     rounding: Literal["half_up"] = "half_up"
     non_product_line_labels: list[str] = Field(default_factory=lambda: ["Phí phục vụ"])
+    # E4a product families (train rulebook §3 / §5).
+    ranking_measure: Literal["qty_base", "revenue", "gross_profit"] = "qty_base"
+    ranking_tie_break: Literal["code_asc"] = "code_asc"
+    price_on_date_include_cancelled_returned: bool = True
+    size_suffixes: dict[str, str] = Field(
+        default_factory=lambda: {"M": "(M)", "L": "(L)"}
+    )
 
     @field_validator("non_product_line_labels")
     @classmethod

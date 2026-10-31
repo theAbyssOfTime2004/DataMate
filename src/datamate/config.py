@@ -1,9 +1,20 @@
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _default_enabled_families() -> list[str]:
+    return [
+        "qty_sold",
+        "top_products",
+        "unsold_products",
+        "products_in_min_orders",
+        "price_on_date",
+        "price_increase_effect",
+    ]
 
 
 class Settings(BaseSettings):
@@ -26,6 +37,8 @@ class Settings(BaseSettings):
     direct_timeout_s: float = 30.0
     direct_repairs: int = 2
     direct_prompt_budget_tokens: int = 6600
+    # Extension families that may answer when the main parser is out of scope.
+    enabled_families: list[str] = Field(default_factory=_default_enabled_families)
 
     @field_validator("cache_dir", "runs_dir", mode="after")
     @classmethod

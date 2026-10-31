@@ -118,6 +118,12 @@ class MetricEngine:
             return Answer.abstain()
         raise TypeError(f"unsupported query spec {spec!r}")
 
+    def answer_ext(self, spec: Any, as_of: datetime.date) -> Answer:
+        """Compute an extension-parser family (E4a+)."""
+        from datamate.metrics.ext_families import answer_ext_family
+
+        return answer_ext_family(self, spec, as_of)
+
     def _answer_value(self, spec: ValueQuery, as_of: datetime.date) -> Answer:
         found = self.compute(spec.query, as_of)
         if found.coverage == "none" or found.value is None:

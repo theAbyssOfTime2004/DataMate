@@ -10,6 +10,7 @@ import pandas as pd
 
 from datamate.etl.build import (
     MappingError,
+    ProductNameIndex,
     _line_product_key,
     _records_to_df,
     _resolve_customer_fields,
@@ -105,7 +106,7 @@ def load_simple_entity(
     warnings: list[str],
     dedupe_counts: Counter[str],
     *,
-    key_by_name: dict[str, str],
+    key_by_name: ProductNameIndex | dict[str, str],
     walk_in_norm_set: set[str],
 ) -> pd.DataFrame:
     """Load one simple entity into a DataFrame with TABLE_COLUMNS[entity] shape."""
@@ -320,7 +321,7 @@ def load_all_simple_tables(
     warnings: list[str],
     dedupe_counts: Counter[str],
     *,
-    key_by_name: dict[str, str],
+    key_by_name: ProductNameIndex | dict[str, str],
     walk_in_norm_set: set[str],
 ) -> dict[str, pd.DataFrame]:
     out: dict[str, pd.DataFrame] = {}

@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from datamate.parse.text import normalize_label
@@ -89,6 +89,7 @@ class ShopContext:
     has_order_ts: bool
     data_start: datetime.date | None
     data_end: datetime.date | None
+    base_units: list[str] = field(default_factory=list)
 
     def product_candidates(self, question: str, k: int = 15) -> list[str]:
         question_tokens = _content_tokens(question)
@@ -151,7 +152,28 @@ def load_shop_context(con: Any) -> ShopContext:
         is not None,
         data_start=_as_date(con.execute("SELECT MIN(order_date) FROM orders").fetchone()),
         data_end=_as_date(con.execute("SELECT MAX(order_date) FROM orders").fetchone()),
+        base_units=_base_units(con),
     )
+
+
+def _base_units(con: Any) -> list[str]:
+    try:
+        rows = con.execute(
+            "SELECT base_unit AS value, COUNT(*) AS n FROM products "
+            "WHERE base_unit IS NOT NULL AND base_unit <> '' "
+            "GROUP BY base_unit ORDER BY n DESC, base_unit ASC"
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — older/minimal fixtures may lack base_unit
+        return []
+    found: list[str] = []
+    for row in rows:
+        text = _nfc(row[0])
+        if not text or text in found:
+            continue
+        found.append(text)
+        if len(found) >= _VALUE_LIMIT:
+            break
+    return found
 
 
 def _top_values(con: Any, sql: str) -> list[str]:

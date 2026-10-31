@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import datetime
-from collections import Counter
+import unicodedata
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -338,34 +339,140 @@ def _build_customers(
     return _records_to_df(rows, CUSTOMERS_COLUMNS)
 
 
-def _product_key_by_name(products_df: pd.DataFrame) -> dict[str, str]:
+@dataclass(frozen=True)
+class ProductNameIndex:
+    """Exact NFC/casefold names and unique accent-stripped folds -> catalog product_key."""
+
+    by_norm: dict[str, str]
+    by_fold: dict[str, str]
+
+
+def _fold_product_name(raw: str | None) -> str | None:
+    """Accent-stripped, case-folded, whitespace-collapsed product name."""
+    if raw is None or not isinstance(raw, str):
+        return None
+    nfc = unicodedata.normalize("NFC", raw).replace("\xa0", " ").strip()
+    if not nfc:
+        return None
+    nfd = unicodedata.normalize("NFD", nfc.casefold())
+    bare = "".join(ch for ch in nfd if unicodedata.category(ch) != "Mn").replace("đ", "d")
+    folded = " ".join(bare.split())
+    return folded or None
+
+
+def _product_key_by_name(products_df: pd.DataFrame) -> ProductNameIndex:
     """Catalog name -> product_key for catalogs keyed by code.
 
     Sales lines that record only the product name must land on the catalog's code key,
     otherwise category, unit cost and base unit never join. A name used by two codes is
-    ambiguous and is left out.
+    ambiguous and is left out. Accent-stripped folds match only when unique.
     """
     if products_df.empty:
-        return {}
+        return ProductNameIndex(by_norm={}, by_fold={})
     keys_by_name: dict[str, set[str]] = {}
+    keys_by_fold: dict[str, set[str]] = {}
     for row in products_df.to_dict("records"):
         pid, pname, pkey = row.get("product_id"), row.get("product_name"), row.get("product_key")
         norm = normalize_label(pname) if isinstance(pname, str) else None
         if pid is None or norm is None or pkey is None:
             continue
-        keys_by_name.setdefault(norm, set()).add(str(pkey))
-    return {name: next(iter(keys)) for name, keys in keys_by_name.items() if len(keys) == 1}
+        key = str(pkey)
+        keys_by_name.setdefault(norm, set()).add(key)
+        folded = _fold_product_name(pname if isinstance(pname, str) else None)
+        if folded is not None:
+            keys_by_fold.setdefault(folded, set()).add(key)
+    by_norm = {name: next(iter(keys)) for name, keys in keys_by_name.items() if len(keys) == 1}
+    by_fold = {
+        name: next(iter(keys))
+        for name, keys in keys_by_fold.items()
+        if len(keys) == 1
+    }
+    return ProductNameIndex(by_norm=by_norm, by_fold=by_fold)
 
 
 def _line_product_key(
-    pid: str | None, pname: str | None, key_by_name: dict[str, str]
+    pid: str | None,
+    pname: str | None,
+    key_by_name: ProductNameIndex | dict[str, str],
 ) -> str | None:
     if pid is not None:
         return pid
     norm = normalize_label(pname)
     if norm is None:
         return None
-    return key_by_name.get(norm, norm)
+    if isinstance(key_by_name, dict):
+        return key_by_name.get(norm, norm)
+    if norm in key_by_name.by_norm:
+        return key_by_name.by_norm[norm]
+    folded = _fold_product_name(pname)
+    if folded is not None and folded in key_by_name.by_fold:
+        return key_by_name.by_fold[folded]
+    return norm
+
+
+def _merge_non_catalog_folded_keys(
+    lines: list[dict[str, Any]],
+    products_df: pd.DataFrame,
+) -> None:
+    """Merge non-catalog line keys that share an accent-stripped fold.
+
+    Winner = most frequent spelling on the lines; tie -> first seen. Catalog keys are
+    never remapped. Folds that are ambiguous across two+ catalog products are left alone.
+    """
+    catalog_keys: set[str] = set()
+    catalog_fold_keys: dict[str, set[str]] = defaultdict(set)
+    for row in products_df.to_dict("records"):
+        pkey = row.get("product_key")
+        if pkey is None:
+            continue
+        key = str(pkey)
+        catalog_keys.add(key)
+        pname = row.get("product_name")
+        folded = _fold_product_name(pname if isinstance(pname, str) else key)
+        if folded is not None:
+            catalog_fold_keys[folded].add(key)
+    ambiguous_folds = {fold for fold, keys in catalog_fold_keys.items() if len(keys) > 1}
+
+    counts: Counter[str] = Counter()
+    first_seen: dict[str, int] = {}
+    fold_of: dict[str, str] = {}
+    for index, pl in enumerate(lines):
+        pkey = pl.get("product_key")
+        if pkey is None:
+            continue
+        key = str(pkey)
+        if key in catalog_keys:
+            continue
+        folded = _fold_product_name(key)
+        if folded is None or folded in ambiguous_folds:
+            continue
+        fold_of[key] = folded
+        counts[key] += 1
+        if key not in first_seen:
+            first_seen[key] = index
+
+    keys_by_fold: dict[str, list[str]] = defaultdict(list)
+    for key, folded in fold_of.items():
+        keys_by_fold[folded].append(key)
+
+    remap: dict[str, str] = {}
+    for keys in keys_by_fold.values():
+        if len(keys) < 2:
+            continue
+        winner = min(keys, key=lambda k: (-counts[k], first_seen[k]))
+        for key in keys:
+            if key != winner:
+                remap[key] = winner
+
+    if not remap:
+        return
+    for pl in lines:
+        pkey = pl.get("product_key")
+        if pkey is None:
+            continue
+        mapped = remap.get(str(pkey))
+        if mapped is not None:
+            pl["product_key"] = mapped
 
 
 def _build_unit_conversions(
@@ -374,7 +481,7 @@ def _build_unit_conversions(
     tracker: _StatTracker,
     warnings: list[str],
     notes: list[str],
-    key_by_name: dict[str, str] | None = None,
+    key_by_name: ProductNameIndex | dict[str, str] | None = None,
 ) -> pd.DataFrame:
     tm = mapping.tables.get("unit_conversions")
     if tm is None:
@@ -419,7 +526,7 @@ def _build_unit_conversions(
         factor: Decimal | None = qty_parsed[0] if qty_parsed is not None else parse_decimal(factor_raw)
         tracker.record("unit_conversions.factor", factor_raw, factor is not None)
 
-        pkey = _line_product_key(pid, pname, key_by_name or {})
+        pkey = _line_product_key(pid, pname, key_by_name or ProductNameIndex({}, {}))
         rows.append(
             {
                 "product_key": pkey,
@@ -495,6 +602,82 @@ def _synthetic_order_id(file_name: str, sheet_name: str | None, row_no: int) -> 
 
 
 _BLANK_STATUS_SHARE = 0.5
+
+
+def _derive_qty_base(
+    lines: list[dict[str, Any]],
+    products_df: pd.DataFrame,
+    unit_conv_df: pd.DataFrame,
+    fill_counts: Counter[str],
+) -> None:
+    """Fill qty_base from qty + unit when the mapping did not provide a qty_base column."""
+    base_by_key: dict[str, str | None] = {}
+    for row in products_df.to_dict("records"):
+        pkey = row.get("product_key")
+        if pkey is None:
+            continue
+        bunit = row.get("base_unit")
+        base_by_key[str(pkey)] = bunit if isinstance(bunit, str) and bunit.strip() else None
+
+    factor_by: dict[tuple[str, str], Decimal] = {}
+    products_with_conv: set[str] = set()
+    for row in unit_conv_df.to_dict("records"):
+        pkey, unit, factor = row.get("product_key"), row.get("unit"), row.get("factor")
+        if pkey is None or unit is None or factor is None:
+            continue
+        unit_norm = normalize_label(str(unit))
+        if unit_norm is None:
+            continue
+        key = str(pkey)
+        products_with_conv.add(key)
+        factor_by[(key, unit_norm)] = (
+            factor if isinstance(factor, Decimal) else Decimal(str(factor))
+        )
+
+    # Products with no catalog base unit and no conversions: one distinct unit on lines -> qty.
+    units_seen: dict[str, set[str]] = defaultdict(set)
+    for pl in lines:
+        pkey = pl.get("product_key")
+        unit = pl.get("unit")
+        if pkey is None or unit is None:
+            continue
+        unit_norm = normalize_label(str(unit))
+        if unit_norm is not None:
+            units_seen[str(pkey)].add(unit_norm)
+    single_unit_products = {
+        pkey
+        for pkey, units in units_seen.items()
+        if len(units) == 1
+        and base_by_key.get(pkey) is None
+        and pkey not in products_with_conv
+    }
+
+    for pl in lines:
+        if pl.get("qty_base") is not None:
+            continue
+        qty = pl.get("qty")
+        pkey = pl.get("product_key")
+        if qty is None or pkey is None:
+            continue
+        pkey_s = str(pkey)
+        unit = pl.get("unit")
+        unit_norm = normalize_label(str(unit)) if isinstance(unit, str) else None
+        base = base_by_key.get(pkey_s)
+        base_norm = normalize_label(base) if isinstance(base, str) else None
+
+        derived: Decimal | None = None
+        if unit_norm is None or (base_norm is not None and unit_norm == base_norm):
+            derived = qty if isinstance(qty, Decimal) else Decimal(str(qty))
+        elif unit_norm is not None and (pkey_s, unit_norm) in factor_by:
+            factor = factor_by[(pkey_s, unit_norm)]
+            q = qty if isinstance(qty, Decimal) else Decimal(str(qty))
+            derived = q * factor
+        elif pkey_s in single_unit_products:
+            derived = qty if isinstance(qty, Decimal) else Decimal(str(qty))
+
+        if derived is not None:
+            pl["qty_base"] = derived
+            fill_counts["order_lines.qty_base"] += 1
 
 
 def _fill_blank_status_as_completed(order_rows: list[dict[str, Any]]) -> bool:
@@ -776,6 +959,11 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
         line_seq_counter[oid_key] += 1
         if pl["line_no"] is None:
             pl["line_no"] = line_seq_counter[oid_key]
+    _merge_non_catalog_folded_keys(parsed_lines, products_df)
+
+    # Derive qty_base when the mapping has no qty_base column.
+    if c_l_qbase is None:
+        _derive_qty_base(parsed_lines, products_df, unit_conv_df, fill_counts)
 
     order_lines_df = _records_to_df(parsed_lines, ORDER_LINES_COLUMNS)
 

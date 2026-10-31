@@ -336,6 +336,11 @@ def _drop_written_baseline(
     return [raw[labels.index(False)]]
 
 
+def period_from_raw(raw: object, as_of: datetime.date) -> PeriodExpr:
+    """Public wrapper so the extension parser reuses the same PeriodExpr kinds."""
+    return _period_expr(raw, as_of)
+
+
 def _period_expr(raw: object, as_of: datetime.date) -> PeriodExpr:
     if not isinstance(raw, dict):
         raise ConvertError("period must be an object")

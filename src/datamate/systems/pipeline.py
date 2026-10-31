@@ -11,7 +11,7 @@ from typing import Any
 
 import duckdb
 
-from datamate.config import PROJECT_ROOT
+from datamate.config import PROJECT_ROOT, settings
 from datamate.etl import load_or_build_canonical
 from datamate.io.profile import BusinessProfile, profile_business
 from datamate.io.questions import Question
@@ -20,6 +20,7 @@ from datamate.llm import LLMUnavailable, get_client
 from datamate.mapping import Mapping, infer_mapping, mapping_fingerprint
 from datamate.metrics import MetricEngine
 from datamate.query.context import ShopContext, load_shop_context
+from datamate.query.ext import parse_ext_question
 from datamate.query.parse import ParseAttempt, parse_question
 from datamate.query.spec import (
     ArgMaxQuery,
@@ -120,6 +121,7 @@ class PipelineSystem:
             "mapping_fingerprint": None,
             "parse_attempts": [],
             "spec": None,
+            "ext_family": None,
             "resolved_ranges": [],
             "coverage": [],
             "sql": [],
@@ -147,6 +149,11 @@ class PipelineSystem:
             trace["timings"]["parse_s"] = round(time.perf_counter() - parse_t0, 6)
             trace["parse_attempts"] = [_attempt_dict(item) for item in parsed.attempts]
             if parsed.spec is None:
+                # Extension parser only when every main attempt is out of scope.
+                if parsed.reason == "out_of_scope":
+                    return self._answer_via_ext(
+                        question, bundle, trace, wall_t0, parse_t0
+                    )
                 trace["abstain_reason"] = parsed.reason or "parse_error"
                 trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
                 return Answer.abstain(), trace
@@ -178,6 +185,51 @@ class PipelineSystem:
             trace["abstain_reason"] = f"{type(exc).__name__}: {exc}"
             trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
             return Answer.abstain(), trace
+
+    def _answer_via_ext(
+        self,
+        question: Question,
+        bundle: _BusinessBundle,
+        trace: dict[str, Any],
+        wall_t0: float,
+        parse_t0: float,
+    ) -> tuple[Answer, dict[str, Any]]:
+        assert bundle.engine is not None and bundle.context is not None
+        ext_t0 = time.perf_counter()
+        ext = parse_ext_question(
+            question.question,
+            bundle.context,
+            self.client,
+            bundle.rules,
+            bundle.calendar,
+            question.as_of_date,
+        )
+        trace["timings"]["ext_parse_s"] = round(time.perf_counter() - ext_t0, 6)
+        trace["timings"]["parse_s"] = round(time.perf_counter() - parse_t0, 6)
+        trace["ext_parse_attempts"] = [_attempt_dict(item) for item in ext.attempts]
+        if ext.spec is None:
+            trace["ext_family"] = None
+            trace["abstain_reason"] = ext.reason or "out_of_scope"
+            trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
+            return Answer.abstain(), trace
+        family = ext.spec.family
+        trace["ext_family"] = family
+        if family == "none" or family not in settings.enabled_families:
+            trace["abstain_reason"] = "out_of_scope"
+            trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
+            return Answer.abstain(), trace
+        trace["spec"] = ext.spec.model_dump(mode="json")
+        engine_t0 = time.perf_counter()
+        with bundle.lock:
+            answer = bundle.engine.answer_ext(ext.spec, question.as_of_date)
+        trace["timings"]["engine_s"] = round(time.perf_counter() - engine_t0, 6)
+        if answer.type == "abstain":
+            trace["abstain_reason"] = "engine_abstain"
+        elif answer.type == "unanswerable":
+            trace["abstain_reason"] = None
+            trace["unanswerable_reason"] = answer.reason
+        trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
+        return answer, trace
 
     def _bundle_for(self, split: str, business_id: str) -> _BusinessBundle:
         key = (split, business_id)
