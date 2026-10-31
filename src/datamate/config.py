@@ -18,6 +18,11 @@ def _default_enabled_families() -> list[str]:
         "top_customers",
         "orders_min_amount",
         "days_min_revenue",
+        "debt_total",
+        "top_debtors",
+        "debt_aging",
+        "debt_added",
+        "debt_collected",
     ]
 
 

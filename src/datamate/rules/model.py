@@ -55,8 +55,30 @@ class RuleConfig(BaseModel):
     # E4b customer identity (train rulebook §3). Mode is detected from shop columns
     # at query time (codes if customer_id is recorded, else folded name).
     customer_tie_break: Literal["code_asc"] = "code_asc"
+    # E4c debt (train rulebook §4): exclude COD / marketplace orders from debt.
+    # Labels are matched after normalize_label against the shop's own values.
+    debt_exclude_payment_labels: list[str] = Field(
+        default_factory=lambda: ["cod", "c.o.d", "thu hộ", "thu ho"]
+    )
+    debt_exclude_channel_labels: list[str] = Field(
+        default_factory=lambda: [
+            "shopee",
+            "lazada",
+            "tiki",
+            "tiktok",
+            "tiktok shop",
+            "sàn",
+            "san",
+            "sàn tmđt",
+            "san tmdt",
+        ]
+    )
 
-    @field_validator("non_product_line_labels")
+    @field_validator(
+        "non_product_line_labels",
+        "debt_exclude_payment_labels",
+        "debt_exclude_channel_labels",
+    )
     @classmethod
     def _nfc_labels(cls, value: list[str]) -> list[str]:
         return [unicodedata.normalize("NFC", label) for label in value]

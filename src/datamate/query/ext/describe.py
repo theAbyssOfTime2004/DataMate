@@ -5,8 +5,13 @@ from __future__ import annotations
 import datetime
 
 from datamate.query.ext.spec import (
+    AgingBucket,
     CustomersMinOrdersQuery,
     DaysMinRevenueQuery,
+    DebtAddedQuery,
+    DebtAgingQuery,
+    DebtCollectedQuery,
+    DebtTotalQuery,
     ExtQuerySpec,
     NoneQuery,
     OrdersMinAmountQuery,
@@ -15,6 +20,7 @@ from datamate.query.ext.spec import (
     ProductsInMinOrdersQuery,
     QtySoldQuery,
     TopCustomersQuery,
+    TopDebtorsQuery,
     TopProductsQuery,
     UnsoldProductsQuery,
 )
@@ -30,11 +36,13 @@ def describe_ext_spec(
     cal: LunarCalendar,
     product_unit: str | None = None,
     customer_who: str | None = None,
+    debt_meta: dict[str, str] | None = None,
 ) -> str:
     """One line per facet: what the spec computes and what it does not restrict.
 
     `product_unit` is the named product's base unit from the shop data, when known.
     `customer_who` states how THIS shop identifies customers (from shop columns).
+    `debt_meta` carries shop payment_source / exclusions / customer_who for debt families.
     """
     if isinstance(spec, NoneQuery):
         return "family: none (no product metric)"
@@ -137,7 +145,73 @@ def describe_ext_spec(
             _period_line(spec.period, as_of, rules, cal),
             "output: one number (day count)",
         )
+    meta = debt_meta or {}
+    pay_src = meta.get("payment_source", "payments")
+    excl = meta.get("exclusions", "none found")
+    debt_who = meta.get("customer_who") or who
+    if isinstance(spec, DebtTotalQuery):
+        if spec.output == "customer_count":
+            return _lines(
+                "measure: number of customers whose remaining debt is above 0",
+                f"as-of: end of {_period_span(spec.date, as_of, rules, cal)}",
+                f"payments from: {pay_src}",
+                f"excluded orders: cancelled; COD/marketplace labels in this shop: {excl}",
+                f"customers: {debt_who} (walk-in orders are not counted as customers)",
+                "output: one number (customer count)",
+            )
+        return _lines(
+            "measure: sum of remaining debt (payable minus paid) over debt orders",
+            f"as-of: end of {_period_span(spec.date, as_of, rules, cal)}",
+            f"payments from: {pay_src}",
+            f"excluded orders: cancelled; COD/marketplace labels in this shop: {excl}",
+            f"customers: {debt_who} (walk-in remaining still counts in the total)",
+            "output: one number (VND)",
+        )
+    if isinstance(spec, TopDebtorsQuery):
+        return _lines(
+            "measure: remaining debt per customer",
+            f"as-of: end of {_period_span(spec.date, as_of, rules, cal)}",
+            f"payments from: {pay_src}",
+            f"excluded orders: cancelled; COD/marketplace labels in this shop: {excl}",
+            f"customers: {debt_who} (walk-in orders omitted from the table)",
+            f"output: table [customer, amount] top {spec.k} by amount",
+        )
+    if isinstance(spec, DebtAgingQuery):
+        return _lines(
+            "measure: remaining debt by age in days (as-of minus order date)",
+            f"as-of: end of {_period_span(spec.date, as_of, rules, cal)}",
+            f"payments from: {pay_src}",
+            f"excluded orders: cancelled; COD/marketplace labels in this shop: {excl}",
+            f"buckets: {_format_buckets(spec.buckets)}",
+            "output: list of amounts in bucket order (VND)",
+        )
+    if isinstance(spec, DebtAddedQuery):
+        return _lines(
+            "measure: unpaid part on the order day of debt orders placed in the period",
+            f"payments from: {pay_src}",
+            f"excluded orders: cancelled; COD/marketplace labels in this shop: {excl}",
+            _period_line(spec.period, as_of, rules, cal),
+            "output: one number (VND)",
+        )
+    if isinstance(spec, DebtCollectedQuery):
+        return _lines(
+            "measure: payments after the order day, dated in the period, on debt orders",
+            f"payments from: {pay_src}",
+            f"excluded orders: cancelled; COD/marketplace labels in this shop: {excl}",
+            _period_line(spec.period, as_of, rules, cal),
+            "output: one number (VND)",
+        )
     raise TypeError(f"unsupported ext spec {spec!r}")
+
+
+def _format_buckets(buckets: list[AgingBucket]) -> str:
+    parts: list[str] = []
+    for b in buckets:
+        if b.hi is None:
+            parts.append(f"{b.lo}+")
+        else:
+            parts.append(f"{b.lo}-{b.hi}")
+    return ", ".join(parts)
 
 
 def _lines(*parts: str) -> str:

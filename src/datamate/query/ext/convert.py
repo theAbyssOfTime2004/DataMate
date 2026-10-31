@@ -9,8 +9,13 @@ from pydantic import TypeAdapter, ValidationError
 
 from datamate.query.convert import ConvertError, period_from_raw
 from datamate.query.ext.spec import (
+    AgingBucket,
     CustomersMinOrdersQuery,
     DaysMinRevenueQuery,
+    DebtAddedQuery,
+    DebtAgingQuery,
+    DebtCollectedQuery,
+    DebtTotalQuery,
     ExtQuerySpec,
     NoneQuery,
     OrdersMinAmountQuery,
@@ -19,6 +24,7 @@ from datamate.query.ext.spec import (
     ProductsInMinOrdersQuery,
     QtySoldQuery,
     TopCustomersQuery,
+    TopDebtorsQuery,
     TopProductsQuery,
     UnsoldProductsQuery,
 )
@@ -141,7 +147,54 @@ def to_ext_query_spec(
         x = _need_money(parsed.get("x"), "x")
         op = _need_op(parsed.get("op"))
         return DaysMinRevenueQuery(x=x, op=op, period=period)  # type: ignore[arg-type]
+    if family == "debt_total":
+        date = _need_as_of_day(parsed, as_of)
+        output = "customer_count" if parsed.get("output") == "count" else "amount"
+        return DebtTotalQuery(date=date, output=output)  # type: ignore[arg-type]
+    if family == "top_debtors":
+        date = _need_as_of_day(parsed, as_of)
+        k = _need_int(parsed.get("k"), "k")
+        return TopDebtorsQuery(k=k, date=date)
+    if family == "debt_aging":
+        date = _need_as_of_day(parsed, as_of)
+        buckets = _need_buckets(parsed.get("buckets"))
+        return DebtAgingQuery(date=date, buckets=buckets)
+    if family == "debt_added":
+        period = _need_period(parsed.get("period"), as_of, "period")
+        return DebtAddedQuery(period=period)
+    if family == "debt_collected":
+        period = _need_period(parsed.get("period"), as_of, "period")
+        return DebtCollectedQuery(period=period)
     raise ConvertError(f"unknown family {family!r}")
+
+
+def _need_as_of_day(parsed: dict[str, Any], as_of: datetime.date) -> PeriodExpr:
+    date = _single_day_from(parsed.get("date"), as_of) or _single_day_from(
+        parsed.get("period"), as_of
+    )
+    if date is None:
+        raise ConvertError("debt family needs a single day in date (as-of)")
+    return date
+
+
+def _need_buckets(raw: object) -> list[AgingBucket]:
+    if not isinstance(raw, list) or not raw:
+        raise ConvertError("debt_aging needs a non-empty buckets list")
+    out: list[AgingBucket] = []
+    for item in raw:
+        if isinstance(item, dict):
+            lo = item.get("lo")
+            hi = item.get("hi")
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            lo, hi = item[0], item[1]
+        else:
+            raise ConvertError(f"bucket must be [lo, hi], got {item!r}")
+        if isinstance(lo, bool) or not isinstance(lo, int) or lo < 0:
+            raise ConvertError(f"bucket lo must be int >= 0, got {lo!r}")
+        if hi is not None and (isinstance(hi, bool) or not isinstance(hi, int) or hi < lo):
+            raise ConvertError(f"bucket hi must be null or int >= lo, got {hi!r}")
+        out.append(AgingBucket(lo=lo, hi=hi))
+    return out
 
 
 def _resolve_count_or_list(raw: object) -> str:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime
+import re
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -11,6 +13,10 @@ from datamate.parse.text import normalize_label
 from datamate.query.ext.spec import (
     CustomersMinOrdersQuery,
     DaysMinRevenueQuery,
+    DebtAddedQuery,
+    DebtAgingQuery,
+    DebtCollectedQuery,
+    DebtTotalQuery,
     ExtQuerySpec,
     NoneQuery,
     OrdersMinAmountQuery,
@@ -19,6 +25,7 @@ from datamate.query.ext.spec import (
     ProductsInMinOrdersQuery,
     QtySoldQuery,
     TopCustomersQuery,
+    TopDebtorsQuery,
     TopProductsQuery,
     UnsoldProductsQuery,
 )
@@ -60,6 +67,16 @@ def answer_ext_family(engine: MetricEngine, spec: ExtQuerySpec, as_of: datetime.
             return _orders_min_amount(engine, spec, as_of)
         if isinstance(spec, DaysMinRevenueQuery):
             return _days_min_revenue(engine, spec, as_of)
+        if isinstance(spec, DebtTotalQuery):
+            return _debt_total(engine, spec, as_of)
+        if isinstance(spec, TopDebtorsQuery):
+            return _top_debtors(engine, spec, as_of)
+        if isinstance(spec, DebtAgingQuery):
+            return _debt_aging(engine, spec, as_of)
+        if isinstance(spec, DebtAddedQuery):
+            return _debt_added(engine, spec, as_of)
+        if isinstance(spec, DebtCollectedQuery):
+            return _debt_collected(engine, spec, as_of)
     except Unanswerable as exc:
         return Answer.unanswerable(str(exc))
     except _Abstain:
@@ -77,6 +94,17 @@ def customer_who_phrase(engine: MetricEngine) -> str:
     if mode == "by_name":
         return "customers identified by name on the order, walk-in orders excluded"
     return "customers"
+
+
+def debt_describe_meta(engine: MetricEngine, as_of_day: datetime.date | None = None) -> dict[str, str]:
+    """Shop-derived phrases for debt describe/verifier lines."""
+    source = _debt_payment_source_label(engine, as_of_day)
+    excluded = _debt_exclusion_phrase(engine)
+    return {
+        "payment_source": source,
+        "exclusions": excluded,
+        "customer_who": customer_who_phrase(engine),
+    }
 
 
 def _qty_sold(engine: MetricEngine, spec: QtySoldQuery, as_of: datetime.date) -> Answer:
@@ -791,6 +819,434 @@ def _days_min_revenue(
         engine._scalar(sql, [*rev_params, window.start, window.end, spec.x])
     )
     return Answer(type="number", answer=render_metric("order_count", total, engine.rules))
+
+
+@dataclass
+class _DebtOrderRow:
+    order_id: str
+    order_date: datetime.date
+    remaining: int
+    is_walk_in: bool
+    customer_ref: str | None
+    customer_label: str | None
+
+
+def _debt_exclude_norm_set(labels: list[str]) -> set[str]:
+    out: set[str] = set()
+    for label in labels:
+        norm = normalize_label(label)
+        if norm is not None:
+            out.add(norm)
+    return out
+
+
+def _shop_labels_matching(
+    engine: MetricEngine, column: str, exclude_norms: set[str]
+) -> list[str]:
+    """Raw distinct order values that are, or contain as whole words, an excluded label.
+
+    "Thu hộ (COD)" matches "cod"; "Sàn TMĐT" matches "sàn tmđt".
+    """
+    if not exclude_norms:
+        return []
+    try:
+        rows = engine.con.execute(
+            f'SELECT DISTINCT "{column}" FROM orders WHERE "{column}" IS NOT NULL'
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return []
+    found: list[str] = []
+    for (raw,) in rows:
+        if not isinstance(raw, str):
+            continue
+        norm = normalize_label(raw)
+        if norm is None:
+            continue
+        words = _label_words(norm)
+        if norm in exclude_norms or any(
+            (label_words := _label_words(label)) and _contains_words(words, label_words)
+            for label in exclude_norms
+        ):
+            found.append(raw)
+    return found
+
+
+def _label_words(text: str) -> list[str]:
+    return re.findall(r"\w+", text)
+
+
+def _contains_words(words: list[str], part: list[str]) -> bool:
+    n = len(part)
+    return any(words[i : i + n] == part for i in range(len(words) - n + 1))
+
+
+def _debt_exclusion_labels(engine: MetricEngine) -> tuple[list[str], list[str]]:
+    pay = _shop_labels_matching(
+        engine,
+        "payment_method",
+        _debt_exclude_norm_set(engine.rules.debt_exclude_payment_labels),
+    )
+    ch = _shop_labels_matching(
+        engine,
+        "channel",
+        _debt_exclude_norm_set(engine.rules.debt_exclude_channel_labels),
+    )
+    return pay, ch
+
+
+def _debt_exclusion_phrase(engine: MetricEngine) -> str:
+    pay, ch = _debt_exclusion_labels(engine)
+    labels = [*pay, *ch]
+    if not labels:
+        return "none found"
+    return ", ".join(labels)
+
+
+def _debt_payment_source_label(
+    engine: MetricEngine, as_of_day: datetime.date | None
+) -> str:
+    if as_of_day is not None and _debts_snapshot_usable(engine, as_of_day):
+        return "debts snapshot"
+    if _ext_recorded(engine, "payments", "amount"):
+        return "payments table"
+    if _ext_recorded(engine, "orders", "amount_paid"):
+        return "amount_paid on the order"
+    return "unavailable"
+
+
+def _debts_snapshot_usable(engine: MetricEngine, as_of_day: datetime.date) -> bool:
+    if not _ext_recorded(engine, "debts", "amount_remaining"):
+        return False
+    try:
+        row = engine.con.execute(
+            "SELECT 1 FROM debts WHERE as_of_date = ? LIMIT 1", [as_of_day]
+        ).fetchone()
+    except Exception:  # noqa: BLE001
+        return False
+    return row is not None
+
+
+def _require_debt_inputs(engine: MetricEngine) -> None:
+    from datamate.metrics.engine import Unanswerable
+
+    if not _ext_recorded(engine, "orders", "order_payable"):
+        raise Unanswerable("order_payable")
+    has_pay = _ext_recorded(engine, "payments", "amount")
+    has_paid = _ext_recorded(engine, "orders", "amount_paid")
+    has_debts = _ext_recorded(engine, "debts", "amount_remaining")
+    if not has_pay and not has_paid and not has_debts:
+        raise Unanswerable("payment")
+
+
+def _debt_not_excluded_sql(
+    engine: MetricEngine, *, order_alias: str = "o"
+) -> tuple[str, list[Any]]:
+    """SQL fragment: not cancelled and not COD/marketplace (shop labels)."""
+    o = order_alias
+    parts = [f"{o}.status <> 'cancelled'"]
+    params: list[Any] = []
+    pay_labels, ch_labels = _debt_exclusion_labels(engine)
+    if pay_labels:
+        marks = ", ".join("?" for _ in pay_labels)
+        parts.append(f"({o}.payment_method IS NULL OR {o}.payment_method NOT IN ({marks}))")
+        params.extend(pay_labels)
+    if ch_labels:
+        marks = ", ".join("?" for _ in ch_labels)
+        parts.append(f"({o}.channel IS NULL OR {o}.channel NOT IN ({marks}))")
+        params.extend(ch_labels)
+    return " AND ".join(parts), params
+
+
+def _customer_fields_for_order(
+    *,
+    mode: str | None,
+    customer_id: object,
+    customer_name: object,
+    is_walk_in: bool,
+) -> tuple[str | None, str | None]:
+    if is_walk_in:
+        return None, None
+    if mode == "by_code":
+        if customer_id is None:
+            return None, None
+        ref = str(customer_id)
+        label = (
+            str(customer_name).strip()
+            if isinstance(customer_name, str) and customer_name.strip()
+            else ref
+        )
+        return ref, label
+    if mode == "by_name":
+        if not isinstance(customer_name, str):
+            return None, None
+        ref = _fold_customer_name(customer_name)
+        if ref is None:
+            return None, None
+        return ref, customer_name.strip()
+    return None, None
+
+
+def _paid_by_date_map(
+    engine: MetricEngine, as_of_day: datetime.date
+) -> dict[str, int]:
+    """order_id -> amount paid by end of as_of_day."""
+    paid: dict[str, int] = {}
+    if _ext_recorded(engine, "payments", "amount"):
+        rows = engine.con.execute(
+            """
+            SELECT order_id, COALESCE(SUM(amount), 0)
+            FROM payments
+            WHERE pay_date IS NOT NULL AND pay_date <= ? AND order_id IS NOT NULL
+            GROUP BY order_id
+            """,
+            [as_of_day],
+        ).fetchall()
+        for oid, amt in rows:
+            paid[str(oid)] = int(amt)
+        return paid
+    # Fallback: amount_paid counts as paid on the order day.
+    rows = engine.con.execute(
+        """
+        SELECT order_id, order_date, COALESCE(amount_paid, 0)
+        FROM orders
+        WHERE order_payable IS NOT NULL
+        """
+    ).fetchall()
+    for oid, odate, amt in rows:
+        if odate is not None and odate <= as_of_day:
+            paid[str(oid)] = int(amt)
+    return paid
+
+
+def _debt_rows_at(
+    engine: MetricEngine, as_of_day: datetime.date
+) -> list[_DebtOrderRow]:
+    """Debt-eligible orders with remaining > 0 at end of as_of_day."""
+    _require_debt_inputs(engine)
+    mode = _detect_customer_mode(engine)
+    excl_sql, excl_params = _debt_not_excluded_sql(engine)
+
+    if _debts_snapshot_usable(engine, as_of_day):
+        rows = engine.con.execute(
+            f"""
+            SELECT d.order_id, d.order_date, d.amount_remaining,
+                   COALESCE(o.is_walk_in, FALSE), o.customer_id, o.customer_name
+            FROM debts d
+            JOIN orders o ON o.order_id = d.order_id
+            WHERE d.as_of_date = ?
+              AND d.amount_remaining IS NOT NULL
+              AND d.amount_remaining > 0
+              AND {excl_sql}
+            """,
+            [as_of_day, *excl_params],
+        ).fetchall()
+        out: list[_DebtOrderRow] = []
+        for oid, odate, rem, walk, cid, cname in rows:
+            ref, label = _customer_fields_for_order(
+                mode=mode,
+                customer_id=cid,
+                customer_name=cname,
+                is_walk_in=bool(walk),
+            )
+            out.append(
+                _DebtOrderRow(
+                    order_id=str(oid),
+                    order_date=odate,
+                    remaining=int(rem),
+                    is_walk_in=bool(walk),
+                    customer_ref=ref,
+                    customer_label=label,
+                )
+            )
+        return out
+
+    paid = _paid_by_date_map(engine, as_of_day)
+    rows = engine.con.execute(
+        f"""
+        SELECT o.order_id, o.order_date, o.order_payable,
+               COALESCE(o.is_walk_in, FALSE), o.customer_id, o.customer_name
+        FROM orders o
+        WHERE o.order_payable IS NOT NULL
+          AND o.order_date IS NOT NULL
+          AND o.order_date <= ?
+          AND {excl_sql}
+        """,
+        [as_of_day, *excl_params],
+    ).fetchall()
+    out = []
+    for oid, odate, payable, walk, cid, cname in rows:
+        remaining = int(payable) - paid.get(str(oid), 0)
+        if remaining <= 0:
+            continue
+        ref, label = _customer_fields_for_order(
+            mode=mode,
+            customer_id=cid,
+            customer_name=cname,
+            is_walk_in=bool(walk),
+        )
+        out.append(
+            _DebtOrderRow(
+                order_id=str(oid),
+                order_date=odate,
+                remaining=remaining,
+                is_walk_in=bool(walk),
+                customer_ref=ref,
+                customer_label=label,
+            )
+        )
+    return out
+
+
+def _resolve_as_of_day(
+    engine: MetricEngine, expr: object, question_as_of: datetime.date
+) -> datetime.date:
+    from datamate.timeres.periods import resolve
+
+    window = resolve(expr, question_as_of, engine.rules, engine.cal)  # type: ignore[arg-type]
+    if window.start != window.end:
+        raise _Abstain()
+    return window.start
+
+
+def _debt_total(
+    engine: MetricEngine, spec: DebtTotalQuery, as_of: datetime.date
+) -> Answer:
+    day = _resolve_as_of_day(engine, spec.date, as_of)
+    rows = _debt_rows_at(engine, day)
+    if spec.output == "customer_count":
+        debtors = {r.customer_ref for r in rows if not r.is_walk_in and r.customer_ref is not None}
+        return Answer(
+            type="number", answer=render_metric("order_count", len(debtors), engine.rules)
+        )
+    total = sum(r.remaining for r in rows)
+    return Answer(type="number", answer=render_metric("revenue", total, engine.rules))
+
+
+def _top_debtors(
+    engine: MetricEngine, spec: TopDebtorsQuery, as_of: datetime.date
+) -> Answer:
+    day = _resolve_as_of_day(engine, spec.date, as_of)
+    rows = _debt_rows_at(engine, day)
+    by_cust: dict[str, tuple[str, int]] = {}
+    for row in rows:
+        if row.is_walk_in or row.customer_ref is None:
+            continue
+        label = row.customer_label or row.customer_ref
+        prev = by_cust.get(row.customer_ref)
+        if prev is None:
+            by_cust[row.customer_ref] = (label, row.remaining)
+        else:
+            by_cust[row.customer_ref] = (prev[0], prev[1] + row.remaining)
+    if not by_cust:
+        raise _Abstain()
+    ranked = sorted(by_cust.items(), key=lambda kv: (-kv[1][1], kv[0]))
+    chosen = ranked[: spec.k]
+    table_rows = [[label, amount] for _, (label, amount) in chosen]
+    return Answer(
+        type="table",
+        answer={"columns": ["customer", "amount"], "rows": table_rows},
+    )
+
+
+def _debt_aging(
+    engine: MetricEngine, spec: DebtAgingQuery, as_of: datetime.date
+) -> Answer:
+    day = _resolve_as_of_day(engine, spec.date, as_of)
+    rows = _debt_rows_at(engine, day)
+    amounts = [0 for _ in spec.buckets]
+    for row in rows:
+        age = (day - row.order_date).days
+        for idx, bucket in enumerate(spec.buckets):
+            if age < bucket.lo:
+                continue
+            if bucket.hi is not None and age > bucket.hi:
+                continue
+            amounts[idx] += row.remaining
+            break
+    return Answer(
+        type="list",
+        answer=[render_metric("revenue", a, engine.rules) for a in amounts],
+    )
+
+
+def _paid_on_order_day_map(engine: MetricEngine) -> dict[str, int]:
+    """Payments dated on the order day (or amount_paid fallback)."""
+    paid: dict[str, int] = {}
+    if _ext_recorded(engine, "payments", "amount"):
+        rows = engine.con.execute(
+            """
+            SELECT p.order_id, COALESCE(SUM(p.amount), 0)
+            FROM payments p
+            JOIN orders o ON o.order_id = p.order_id
+            WHERE p.pay_date IS NOT NULL
+              AND o.order_date IS NOT NULL
+              AND p.pay_date = o.order_date
+            GROUP BY p.order_id
+            """
+        ).fetchall()
+        for oid, amt in rows:
+            paid[str(oid)] = int(amt)
+        return paid
+    rows = engine.con.execute(
+        "SELECT order_id, COALESCE(amount_paid, 0) FROM orders WHERE order_payable IS NOT NULL"
+    ).fetchall()
+    for oid, amt in rows:
+        paid[str(oid)] = int(amt)
+    return paid
+
+
+def _debt_added(
+    engine: MetricEngine, spec: DebtAddedQuery, as_of: datetime.date
+) -> Answer:
+    _require_debt_inputs(engine)
+    cov, window = engine._window(spec.period, as_of)
+    if cov == "none":
+        return Answer.unanswerable("period lies entirely outside the shop's data")
+    excl_sql, excl_params = _debt_not_excluded_sql(engine)
+    paid_same_day = _paid_on_order_day_map(engine)
+    rows = engine.con.execute(
+        f"""
+        SELECT o.order_id, o.order_payable
+        FROM orders o
+        WHERE o.order_payable IS NOT NULL
+          AND o.order_date BETWEEN ? AND ?
+          AND {excl_sql}
+        """,
+        [window.start, window.end, *excl_params],
+    ).fetchall()
+    total = 0
+    for oid, payable in rows:
+        unpaid = int(payable) - paid_same_day.get(str(oid), 0)
+        if unpaid > 0:
+            total += unpaid
+    return Answer(type="number", answer=render_metric("revenue", total, engine.rules))
+
+
+def _debt_collected(
+    engine: MetricEngine, spec: DebtCollectedQuery, as_of: datetime.date
+) -> Answer:
+    _require_debt_inputs(engine)
+    cov, window = engine._window(spec.period, as_of)
+    if cov == "none":
+        return Answer.unanswerable("period lies entirely outside the shop's data")
+    # Without a payments table, amount_paid is on the order day -> nothing "collected" later.
+    if not _ext_recorded(engine, "payments", "amount"):
+        return Answer(type="number", answer=0)
+    excl_sql, excl_params = _debt_not_excluded_sql(engine)
+    rows = engine.con.execute(
+        f"""
+        SELECT COALESCE(SUM(p.amount), 0)
+        FROM payments p
+        JOIN orders o ON o.order_id = p.order_id
+        WHERE p.pay_date BETWEEN ? AND ?
+          AND o.order_date IS NOT NULL
+          AND p.pay_date > o.order_date
+          AND {excl_sql}
+        """,
+        [window.start, window.end, *excl_params],
+    ).fetchone()
+    total = int(rows[0]) if rows and rows[0] is not None else 0
+    return Answer(type="number", answer=render_metric("revenue", total, engine.rules))
 
 
 def product_base_unit(engine: MetricEngine, product: str) -> str | None:

@@ -24,7 +24,8 @@ _SYSTEM = "\n".join(  # noqa: FLY002
         "size or unit; money instead of quantity or the reverse; stock, purchases or",
         "deliveries instead of sales; a specific customer, channel or payment method;",
         "a count instead of a list or share, or the reverse; a different threshold or",
-        "operator; customers instead of products or the reverse; a different period or day.",
+        "operator; customers instead of products or the reverse; debt total vs top debtors",
+        "vs aging vs collected; a different period or day.",
         "A unit word in the question (kg, ly, hop, dia, ...) only names how the product is",
         "counted; it matches unless the description counts in a different unit.",
         "Otherwise answer yes. Reply with one word: yes or no.",
@@ -288,6 +289,122 @@ VERIFY_FEW_SHOTS: tuple[VerifyExample, ...] = (
         ),
         answer="no",
     ),
+    VerifyExample(
+        question="Het ngay 12 thang 3 tiem Sen con no bao nhieu tien",
+        description=_desc(
+            "measure: sum of remaining debt (payable minus paid) over debt orders",
+            "as-of: end of 2025-03-12",
+            "payments from: payments table",
+            "excluded orders: cancelled; COD/marketplace labels in this shop: COD",
+            f"customers: {_WHO_CODE} (walk-in remaining still counts in the total)",
+            "output: one number (VND)",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Het ngay 12 thang 3 tiem Sen ai no nhieu nhat",
+        description=_desc(
+            "measure: sum of remaining debt (payable minus paid) over debt orders",
+            "as-of: end of 2025-03-12",
+            "payments from: payments table",
+            "excluded orders: cancelled; COD/marketplace labels in this shop: COD",
+            f"customers: {_WHO_CODE} (walk-in remaining still counts in the total)",
+            "output: one number (VND)",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="Cho bang 3 khach no nhieu nhat tinh den het hom nay o tiem Sen",
+        description=_desc(
+            "measure: remaining debt per customer",
+            "as-of: end of 2025-08-20",
+            "payments from: payments table",
+            "excluded orders: cancelled; COD/marketplace labels in this shop: none found",
+            f"customers: {_WHO_NAME} (walk-in orders omitted from the table)",
+            "output: table [customer, amount] top 3 by amount",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Cho bang 3 khach no nhieu nhat tinh den het hom nay o tiem Sen",
+        description=_desc(
+            "measure: remaining debt per customer",
+            "as-of: end of 2025-08-20",
+            "payments from: payments table",
+            "excluded orders: cancelled; COD/marketplace labels in this shop: none found",
+            f"customers: {_WHO_NAME} (walk-in orders omitted from the table)",
+            "output: table [customer, amount] top 5 by amount",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="No theo tuoi 0 den 7, 8 den 30, tren 30 ngay het ngay 1 thang 9 o tiem Sen",
+        description=_desc(
+            "measure: remaining debt by age in days (as-of minus order date)",
+            "as-of: end of 2025-09-01",
+            "payments from: amount_paid on the order",
+            "excluded orders: cancelled; COD/marketplace labels in this shop: Shopee",
+            "buckets: 0-7, 8-30, 31+",
+            "output: list of amounts in bucket order (VND)",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="No theo tuoi 0 den 7, 8 den 30, tren 30 ngay het ngay 1 thang 9 o tiem Sen",
+        description=_desc(
+            "measure: remaining debt by age in days (as-of minus order date)",
+            "as-of: end of 2025-09-01",
+            "payments from: amount_paid on the order",
+            "excluded orders: cancelled; COD/marketplace labels in this shop: Shopee",
+            "buckets: 0-30, 31+",
+            "output: list of amounts in bucket order (VND)",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="Thang Bay tiem Sen phat sinh them bao nhieu tien ghi no",
+        description=_desc(
+            "measure: unpaid part on the order day of debt orders placed in the period",
+            "payments from: payments table",
+            "excluded orders: cancelled; COD/marketplace labels in this shop: COD",
+            "period: 2025-07-01 .. 2025-07-31 (order date)",
+            "output: one number (VND)",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Thang Bay tiem Sen nhan bao nhieu tien khach tra cham",
+        description=_desc(
+            "measure: unpaid part on the order day of debt orders placed in the period",
+            "payments from: payments table",
+            "excluded orders: cancelled; COD/marketplace labels in this shop: COD",
+            "period: 2025-07-01 .. 2025-07-31 (order date)",
+            "output: one number (VND)",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="Bay ngay gan day tiem Sen nhan bao nhieu tien khach tra cham",
+        description=_desc(
+            "measure: payments after the order day, dated in the period, on debt orders",
+            "payments from: payments table",
+            "excluded orders: cancelled; COD/marketplace labels in this shop: none found",
+            "period: 2025-10-06 .. 2025-10-12 (order date)",
+            "output: one number (VND)",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Bay ngay gan day tiem Sen phat sinh them bao nhieu tien ghi no",
+        description=_desc(
+            "measure: payments after the order day, dated in the period, on debt orders",
+            "payments from: payments table",
+            "excluded orders: cancelled; COD/marketplace labels in this shop: none found",
+            "period: 2025-10-06 .. 2025-10-12 (order date)",
+            "output: one number (VND)",
+        ),
+        answer="no",
+    ),
 )
 
 
@@ -300,6 +417,7 @@ def verify_ext_spec(
     as_of: datetime.date,
     product_unit: str | None = None,
     customer_who: str | None = None,
+    debt_meta: dict[str, str] | None = None,
 ) -> tuple[float, str]:
     """Return (p_yes, description)."""
     description = describe_ext_spec(
@@ -309,6 +427,7 @@ def verify_ext_spec(
         cal,
         product_unit=product_unit,
         customer_who=customer_who,
+        debt_meta=debt_meta,
     )
     messages = _build_messages(question, description, few_shot=settings.ext_verify_few_shot)
     probs = client.chat_choice_probs(messages, list(_CHOICES))

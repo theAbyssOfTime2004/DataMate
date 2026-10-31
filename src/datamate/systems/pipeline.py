@@ -225,7 +225,15 @@ class PipelineSystem:
         product = getattr(ext.spec, "product", None)
         product_unit = None
         customer_who = None
-        if product or family in {"customers_min_orders", "top_customers"}:
+        debt_meta = None
+        _debt_families = {
+            "debt_total",
+            "top_debtors",
+            "debt_aging",
+            "debt_added",
+            "debt_collected",
+        }
+        if product or family in {"customers_min_orders", "top_customers"} | _debt_families:
             with bundle.lock:
                 if product:
                     product_unit = product_base_unit(bundle.engine, product)
@@ -233,6 +241,25 @@ class PipelineSystem:
                     from datamate.metrics.ext_families import customer_who_phrase
 
                     customer_who = customer_who_phrase(bundle.engine)
+                if family in _debt_families:
+                    from datamate.metrics.ext_families import debt_describe_meta
+                    from datamate.timeres.periods import resolve as resolve_period
+
+                    as_of_day = None
+                    date_expr = getattr(ext.spec, "date", None)
+                    if date_expr is not None:
+                        try:
+                            window = resolve_period(
+                                date_expr,
+                                question.as_of_date,
+                                bundle.rules,
+                                bundle.calendar,
+                            )
+                            if window.start == window.end:
+                                as_of_day = window.start
+                        except Exception:  # noqa: BLE001
+                            as_of_day = None
+                    debt_meta = debt_describe_meta(bundle.engine, as_of_day)
         p_yes, description = verify_ext_spec(
             question.question,
             ext.spec,
@@ -242,6 +269,7 @@ class PipelineSystem:
             question.as_of_date,
             product_unit=product_unit,
             customer_who=customer_who,
+            debt_meta=debt_meta,
         )
         trace["timings"]["ext_verify_s"] = round(time.perf_counter() - verify_t0, 6)
         trace["ext_verify_p"] = round(p_yes, 4)

@@ -19,6 +19,11 @@ ExtFamily = Literal[
     "top_customers",
     "orders_min_amount",
     "days_min_revenue",
+    "debt_total",
+    "top_debtors",
+    "debt_aging",
+    "debt_added",
+    "debt_collected",
     "none",
 ]
 
@@ -135,6 +140,52 @@ class DaysMinRevenueQuery(BaseModel):
     period: PeriodExpr
 
 
+class AgingBucket(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lo: int = Field(ge=0)
+    hi: int | None = None  # None = open-ended (no upper bound)
+
+
+class DebtTotalQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["debt_total"] = "debt_total"
+    date: PeriodExpr  # single day: end-of-day as-of
+    # amount = total remaining VND; customer_count = customers with remaining > 0.
+    output: Literal["amount", "customer_count"] = "amount"
+
+
+class TopDebtorsQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["top_debtors"] = "top_debtors"
+    k: int = Field(ge=1)
+    date: PeriodExpr
+
+
+class DebtAgingQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["debt_aging"] = "debt_aging"
+    date: PeriodExpr
+    buckets: list[AgingBucket] = Field(min_length=1)
+
+
+class DebtAddedQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["debt_added"] = "debt_added"
+    period: PeriodExpr
+
+
+class DebtCollectedQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["debt_collected"] = "debt_collected"
+    period: PeriodExpr
+
+
 class NoneQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -152,6 +203,11 @@ ExtQuerySpec = Annotated[
     | TopCustomersQuery
     | OrdersMinAmountQuery
     | DaysMinRevenueQuery
+    | DebtTotalQuery
+    | TopDebtorsQuery
+    | DebtAgingQuery
+    | DebtAddedQuery
+    | DebtCollectedQuery
     | NoneQuery,
     Field(discriminator="family"),
 ]
@@ -170,4 +226,12 @@ E4B_FAMILIES: tuple[str, ...] = (
     "top_customers",
     "orders_min_amount",
     "days_min_revenue",
+)
+
+E4C_FAMILIES: tuple[str, ...] = (
+    "debt_total",
+    "top_debtors",
+    "debt_aging",
+    "debt_added",
+    "debt_collected",
 )
