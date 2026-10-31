@@ -224,9 +224,15 @@ class PipelineSystem:
         verify_t0 = time.perf_counter()
         product = getattr(ext.spec, "product", None)
         product_unit = None
-        if product:
+        customer_who = None
+        if product or family in {"customers_min_orders", "top_customers"}:
             with bundle.lock:
-                product_unit = product_base_unit(bundle.engine, product)
+                if product:
+                    product_unit = product_base_unit(bundle.engine, product)
+                if family in {"customers_min_orders", "top_customers"}:
+                    from datamate.metrics.ext_families import customer_who_phrase
+
+                    customer_who = customer_who_phrase(bundle.engine)
         p_yes, description = verify_ext_spec(
             question.question,
             ext.spec,
@@ -235,6 +241,7 @@ class PipelineSystem:
             bundle.calendar,
             question.as_of_date,
             product_unit=product_unit,
+            customer_who=customer_who,
         )
         trace["timings"]["ext_verify_s"] = round(time.perf_counter() - verify_t0, 6)
         trace["ext_verify_p"] = round(p_yes, 4)

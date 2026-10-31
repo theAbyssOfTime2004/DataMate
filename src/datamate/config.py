@@ -14,6 +14,10 @@ def _default_enabled_families() -> list[str]:
         "products_in_min_orders",
         "price_on_date",
         "price_increase_effect",
+        "customers_min_orders",
+        "top_customers",
+        "orders_min_amount",
+        "days_min_revenue",
     ]
 
 

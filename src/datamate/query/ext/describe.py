@@ -5,12 +5,16 @@ from __future__ import annotations
 import datetime
 
 from datamate.query.ext.spec import (
+    CustomersMinOrdersQuery,
+    DaysMinRevenueQuery,
     ExtQuerySpec,
     NoneQuery,
+    OrdersMinAmountQuery,
     PriceIncreaseEffectQuery,
     PriceOnDateQuery,
     ProductsInMinOrdersQuery,
     QtySoldQuery,
+    TopCustomersQuery,
     TopProductsQuery,
     UnsoldProductsQuery,
 )
@@ -25,10 +29,12 @@ def describe_ext_spec(
     rules: RuleConfig,
     cal: LunarCalendar,
     product_unit: str | None = None,
+    customer_who: str | None = None,
 ) -> str:
     """One line per facet: what the spec computes and what it does not restrict.
 
     `product_unit` is the named product's base unit from the shop data, when known.
+    `customer_who` states how THIS shop identifies customers (from shop columns).
     """
     if isinstance(spec, NoneQuery):
         return "family: none (no product metric)"
@@ -93,6 +99,44 @@ def describe_ext_spec(
             f"increase day: {day}",
             "output: one percent",
         )
+    who = customer_who or "customers"
+    if isinstance(spec, CustomersMinOrdersQuery):
+        out = (
+            "output: count of customers"
+            if spec.output == "count"
+            else "output: percent = those customers / all customers who bought in the period x 100"
+        )
+        return _lines(
+            f"measure: customers with at least {spec.n} revenue orders in the period",
+            f"customers: {who}",
+            _customer_unrestricted(),
+            _period_line(spec.period, as_of, rules, cal),
+            out,
+        )
+    if isinstance(spec, TopCustomersQuery):
+        measure = "money revenue" if spec.by == "revenue" else "order count"
+        return _lines(
+            f"measure: {measure}",
+            f"customers: {who}",
+            _customer_unrestricted(),
+            _period_line(spec.period, as_of, rules, cal),
+            _top_customer_output(spec.k, measure, spec.mode),
+        )
+    if isinstance(spec, OrdersMinAmountQuery):
+        return _lines(
+            f"measure: count of revenue orders whose order revenue {spec.op} {spec.x} VND",
+            _threshold_unrestricted(),
+            _period_line(spec.period, as_of, rules, cal),
+            "output: one number (order count)",
+        )
+    if isinstance(spec, DaysMinRevenueQuery):
+        return _lines(
+            f"measure: count of days whose revenue {spec.op} {spec.x} VND "
+            "(days with no orders never qualify)",
+            _threshold_unrestricted(),
+            _period_line(spec.period, as_of, rules, cal),
+            "output: one number (day count)",
+        )
     raise TypeError(f"unsupported ext spec {spec!r}")
 
 
@@ -127,6 +171,16 @@ def _top_output(k: int, measure: str, mode: str) -> str:
     return f"output: top {k} names ordered by {measure} ({order} first), tie by code"
 
 
+def _top_customer_output(k: int, measure: str, mode: str) -> str:
+    order = "highest" if mode == "max" else "lowest"
+    if k == 1:
+        return f"output: one name ({order} by {measure}, tie by code or name)"
+    return (
+        f"output: top {k} names ordered by {measure} ({order} first), "
+        "tie by code or name"
+    )
+
+
 def _products_line(
     *, product: str | None, category: str | None, base_unit: str | None
 ) -> str:
@@ -149,6 +203,14 @@ def _size_line(size: str | None) -> str:
 
 def _common_unrestricted() -> str:
     return "not filtered by: delivery status, customer, payment method, channel"
+
+
+def _customer_unrestricted() -> str:
+    return "not filtered by: product, channel, payment method, delivery status"
+
+
+def _threshold_unrestricted() -> str:
+    return "not filtered by: product, customer, channel, payment method, delivery status"
 
 
 def _period_line(

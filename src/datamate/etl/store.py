@@ -18,7 +18,7 @@ from datamate.mapping.fields import FIELD_TYPES, SIMPLE_ENTITIES
 from datamate.mapping.model import Mapping, mapping_fingerprint
 
 # Bump on any change to ETL output shape/semantics (even if mapping fingerprint is unchanged).
-ETL_VERSION = "1.8"  # 1.8: merge non-catalog line keys that share a fold
+ETL_VERSION = "1.9"  # 1.9: initials of multi-word walk-in labels count as walk-in
 
 _TYPE_FROM_FIELD: dict[str, str] = {
     "date": "DATE",

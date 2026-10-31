@@ -1,4 +1,4 @@
-"""E4a product-family computations on MetricEngine (SQL over canonical tables)."""
+"""E4a/E4b family computations on MetricEngine (SQL over canonical tables)."""
 
 from __future__ import annotations
 
@@ -9,15 +9,20 @@ from typing import TYPE_CHECKING, Any
 from datamate.metrics.format import render_metric, render_percent
 from datamate.parse.text import normalize_label
 from datamate.query.ext.spec import (
+    CustomersMinOrdersQuery,
+    DaysMinRevenueQuery,
     ExtQuerySpec,
     NoneQuery,
+    OrdersMinAmountQuery,
     PriceIncreaseEffectQuery,
     PriceOnDateQuery,
     ProductsInMinOrdersQuery,
     QtySoldQuery,
+    TopCustomersQuery,
     TopProductsQuery,
     UnsoldProductsQuery,
 )
+from datamate.query.grounding import fold as fold_text
 from datamate.scoring.answer import Answer
 from datamate.timeres.periods import DateRange, PeriodError
 
@@ -47,6 +52,14 @@ def answer_ext_family(engine: MetricEngine, spec: ExtQuerySpec, as_of: datetime.
             return _price_on_date(engine, spec, as_of)
         if isinstance(spec, PriceIncreaseEffectQuery):
             return _price_increase_effect(engine, spec, as_of)
+        if isinstance(spec, CustomersMinOrdersQuery):
+            return _customers_min_orders(engine, spec, as_of)
+        if isinstance(spec, TopCustomersQuery):
+            return _top_customers(engine, spec, as_of)
+        if isinstance(spec, OrdersMinAmountQuery):
+            return _orders_min_amount(engine, spec, as_of)
+        if isinstance(spec, DaysMinRevenueQuery):
+            return _days_min_revenue(engine, spec, as_of)
     except Unanswerable as exc:
         return Answer.unanswerable(str(exc))
     except _Abstain:
@@ -54,6 +67,16 @@ def answer_ext_family(engine: MetricEngine, spec: ExtQuerySpec, as_of: datetime.
     except PeriodError:
         return Answer.abstain()
     raise TypeError(f"unsupported ext spec {spec!r}")
+
+
+def customer_who_phrase(engine: MetricEngine) -> str:
+    """How THIS shop identifies customers (for describe/verifier)."""
+    mode = _detect_customer_mode(engine)
+    if mode == "by_code":
+        return "customers identified by customer code, walk-in orders excluded"
+    if mode == "by_name":
+        return "customers identified by name on the order, walk-in orders excluded"
+    return "customers"
 
 
 def _qty_sold(engine: MetricEngine, spec: QtySoldQuery, as_of: datetime.date) -> Answer:
@@ -529,6 +552,245 @@ def _ext_recorded(engine: MetricEngine, table: str, column: str) -> bool:
         present = False
     engine._present[key] = present
     return present
+
+
+def _detect_customer_mode(engine: MetricEngine) -> str | None:
+    """by_code if customer_id is recorded, else by_name if customer_name is; else None."""
+    if _ext_recorded(engine, "orders", "customer_id"):
+        return "by_code"
+    if _ext_recorded(engine, "orders", "customer_name"):
+        return "by_name"
+    return None
+
+
+def _fold_customer_name(raw: str | None) -> str | None:
+    if raw is None or not isinstance(raw, str):
+        return None
+    folded = fold_text(raw)
+    return folded or None
+
+
+def _revenue_order_predicates(
+    engine: MetricEngine, *, order_alias: str = "o"
+) -> tuple[str, list[Any]]:
+    o = order_alias
+    parts: list[str] = []
+    params: list[Any] = []
+    if not engine.rules.revenue_statuses:
+        parts.append("FALSE")
+    else:
+        marks = ", ".join("?" for _ in engine.rules.revenue_statuses)
+        parts.append(f"{o}.status IN ({marks})")
+        params.extend(engine.rules.revenue_statuses)
+    if engine.rules.exclude_orders_with_return:
+        parts.append(f"NOT {o}.has_return")
+    return " AND ".join(parts), params
+
+
+def _ensure_customer_orders(engine: MetricEngine) -> str:
+    """Build TEMP customer_orders over revenue orders; return mode. Raises Unanswerable."""
+    from datamate.metrics.engine import Unanswerable
+
+    if getattr(engine, "_dm_co_ready", False):
+        mode = engine._dm_co_mode
+        if mode is None:
+            raise Unanswerable("customer")
+        return str(mode)
+
+    mode = _detect_customer_mode(engine)
+    if mode is None:
+        engine._dm_co_mode = None
+        engine._dm_co_ready = True
+        raise Unanswerable("customer")
+
+    rev_where, rev_params = _revenue_order_predicates(engine)
+    if mode == "by_code":
+        engine.con.execute(
+            f"""
+            CREATE OR REPLACE TEMP TABLE customer_orders AS
+            SELECT o.order_id,
+                   CAST(o.customer_id AS VARCHAR) AS customer_ref,
+                   COALESCE(
+                     NULLIF(TRIM(CAST(o.customer_name AS VARCHAR)), ''),
+                     CAST(o.customer_id AS VARCHAR)
+                   ) AS customer_label
+            FROM orders o
+            WHERE {rev_where}
+              AND o.customer_id IS NOT NULL
+              AND NOT COALESCE(o.is_walk_in, FALSE)
+            """,
+            rev_params,
+        )
+    else:
+        rows = engine.con.execute(
+            f"""
+            SELECT o.order_id, o.customer_name
+            FROM orders o
+            WHERE {rev_where}
+              AND o.customer_name IS NOT NULL
+              AND NOT COALESCE(o.is_walk_in, FALSE)
+            """,
+            rev_params,
+        ).fetchall()
+        engine.con.execute(
+            """
+            CREATE OR REPLACE TEMP TABLE customer_orders (
+                order_id VARCHAR,
+                customer_ref VARCHAR,
+                customer_label VARCHAR
+            )
+            """
+        )
+        batch: list[tuple[str, str, str]] = []
+        for order_id, cname in rows:
+            ref = _fold_customer_name(cname if isinstance(cname, str) else None)
+            if ref is None:
+                continue
+            label = str(cname).strip()
+            batch.append((str(order_id), ref, label))
+        if batch:
+            engine.con.executemany(
+                "INSERT INTO customer_orders VALUES (?, ?, ?)", batch
+            )
+
+    engine._dm_co_mode = mode
+    engine._dm_co_ready = True
+    return mode
+
+
+def _customers_min_orders(
+    engine: MetricEngine, spec: CustomersMinOrdersQuery, as_of: datetime.date
+) -> Answer:
+    cov, window = engine._window(spec.period, as_of)
+    if cov == "none":
+        return Answer.unanswerable("period lies entirely outside the shop's data")
+    _ensure_customer_orders(engine)
+    sql = """
+        SELECT c.customer_ref, COUNT(DISTINCT c.order_id) AS n_orders
+        FROM customer_orders c
+        JOIN orders o ON o.order_id = c.order_id
+        WHERE o.order_date BETWEEN ? AND ?
+        GROUP BY c.customer_ref
+    """
+    rows = engine.con.execute(sql, [window.start, window.end]).fetchall()
+    if not rows:
+        if spec.output == "share":
+            raise _Abstain()
+        return Answer(type="number", answer=0)
+    qualifying = sum(1 for r in rows if int(r[1]) >= spec.n)
+    if spec.output == "count":
+        return Answer(
+            type="number",
+            answer=render_metric("order_count", qualifying, engine.rules),
+        )
+    total = len(rows)
+    percent = (Decimal(qualifying) * Decimal(100)) / Decimal(total)
+    return Answer(type="percent", answer=render_percent(percent, engine.rules))
+
+
+def _top_customers(
+    engine: MetricEngine, spec: TopCustomersQuery, as_of: datetime.date
+) -> Answer:
+    cov, window = engine._window(spec.period, as_of)
+    if cov == "none":
+        return Answer.unanswerable("period lies entirely outside the shop's data")
+    _ensure_customer_orders(engine)
+    if spec.by == "order_count":
+        sql = """
+            SELECT c.customer_ref,
+                   MAX(c.customer_label) AS customer_label,
+                   COUNT(DISTINCT c.order_id) AS amount
+            FROM customer_orders c
+            JOIN orders o ON o.order_id = c.order_id
+            WHERE o.order_date BETWEEN ? AND ?
+            GROUP BY c.customer_ref
+        """
+        rows = engine.con.execute(sql, [window.start, window.end]).fetchall()
+    else:
+        sql = """
+            SELECT c.customer_ref,
+                   MAX(c.customer_label) AS customer_label,
+                   COALESCE(SUM(l.line_amount), 0) AS amount
+            FROM customer_orders c
+            JOIN orders o ON o.order_id = c.order_id
+            JOIN order_lines l ON l.order_id = o.order_id
+            WHERE o.order_date BETWEEN ? AND ?
+            GROUP BY c.customer_ref
+        """
+        rows = engine.con.execute(sql, [window.start, window.end]).fetchall()
+    if not rows:
+        raise _Abstain()
+    ranked = _rank_customer_rows(
+        [(str(r[0]), str(r[1]), int(r[2]) if r[2] is not None else 0) for r in rows],
+        mode=spec.mode,
+    )
+    chosen = ranked[: spec.k]
+    if spec.k == 1:
+        return Answer(type="string", answer=chosen[0][1])
+    return Answer(type="list", answer=[row[1] for row in chosen])
+
+
+def _rank_customer_rows(
+    rows: list[tuple[str, str, int]], *, mode: str
+) -> list[tuple[str, str, int]]:
+    """Sort by measure (max/min), tie -> customer_ref ascending (code or folded name)."""
+    if mode == "max":
+        return sorted(rows, key=lambda r: (-r[2], r[0]))
+    return sorted(rows, key=lambda r: (r[2], r[0]))
+
+
+def _orders_min_amount(
+    engine: MetricEngine, spec: OrdersMinAmountQuery, as_of: datetime.date
+) -> Answer:
+    from datamate.metrics.engine import _as_int
+
+    cov, window = engine._window(spec.period, as_of)
+    if cov == "none":
+        return Answer.unanswerable("period lies entirely outside the shop's data")
+    rev_where, rev_params = _revenue_order_predicates(engine)
+    op = spec.op
+    sql = f"""
+        SELECT COUNT(*) FROM (
+            SELECT o.order_id
+            FROM orders o
+            LEFT JOIN order_lines l ON l.order_id = o.order_id
+            WHERE {rev_where}
+              AND o.order_date BETWEEN ? AND ?
+            GROUP BY o.order_id
+            HAVING COALESCE(SUM(l.line_amount), 0) {op} ?
+        ) t
+    """
+    total = _as_int(
+        engine._scalar(sql, [*rev_params, window.start, window.end, spec.x])
+    )
+    return Answer(type="number", answer=render_metric("order_count", total, engine.rules))
+
+
+def _days_min_revenue(
+    engine: MetricEngine, spec: DaysMinRevenueQuery, as_of: datetime.date
+) -> Answer:
+    from datamate.metrics.engine import _as_int
+
+    cov, window = engine._window(spec.period, as_of)
+    if cov == "none":
+        return Answer.unanswerable("period lies entirely outside the shop's data")
+    rev_where, rev_params = _revenue_order_predicates(engine)
+    op = spec.op
+    sql = f"""
+        SELECT COUNT(*) FROM (
+            SELECT o.order_date
+            FROM orders o
+            LEFT JOIN order_lines l ON l.order_id = o.order_id
+            WHERE {rev_where}
+              AND o.order_date BETWEEN ? AND ?
+            GROUP BY o.order_date
+            HAVING COALESCE(SUM(l.line_amount), 0) {op} ?
+        ) t
+    """
+    total = _as_int(
+        engine._scalar(sql, [*rev_params, window.start, window.end, spec.x])
+    )
+    return Answer(type="number", answer=render_metric("order_count", total, engine.rules))
 
 
 def product_base_unit(engine: MetricEngine, product: str) -> str | None:

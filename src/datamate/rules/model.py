@@ -52,6 +52,9 @@ class RuleConfig(BaseModel):
     size_suffixes: dict[str, str] = Field(
         default_factory=lambda: {"M": "(M)", "L": "(L)"}
     )
+    # E4b customer identity (train rulebook §3). Mode is detected from shop columns
+    # at query time (codes if customer_id is recorded, else folded name).
+    customer_tie_break: Literal["code_asc"] = "code_asc"
 
     @field_validator("non_product_line_labels")
     @classmethod

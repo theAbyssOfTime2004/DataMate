@@ -1,4 +1,4 @@
-"""Extension query specs for product (and later customer/debt) families."""
+"""Extension query specs for product, customer, and threshold families."""
 
 from __future__ import annotations
 
@@ -15,12 +15,19 @@ ExtFamily = Literal[
     "products_in_min_orders",
     "price_on_date",
     "price_increase_effect",
+    "customers_min_orders",
+    "top_customers",
+    "orders_min_amount",
+    "days_min_revenue",
     "none",
 ]
 
 TopBy = Literal["qty_base", "revenue", "gross_profit"]
+CustomerTopBy = Literal["revenue", "order_count"]
 TopMode = Literal["max", "min"]
 CountOrList = Literal["count", "list"]
+CountOrShare = Literal["count", "share"]
+ThresholdOp = Literal[">=", ">"]
 CafeSize = Literal["M", "L"]
 
 
@@ -91,6 +98,43 @@ class PriceIncreaseEffectQuery(BaseModel):
     date: PeriodExpr | None = None  # optional anchor; else find first increase
 
 
+class CustomersMinOrdersQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["customers_min_orders"] = "customers_min_orders"
+    n: int = Field(ge=1)
+    output: CountOrShare
+    period: PeriodExpr
+
+
+class TopCustomersQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["top_customers"] = "top_customers"
+    k: int = Field(ge=1)
+    by: CustomerTopBy
+    mode: TopMode = "max"
+    period: PeriodExpr
+
+
+class OrdersMinAmountQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["orders_min_amount"] = "orders_min_amount"
+    x: int = Field(ge=0)
+    op: ThresholdOp
+    period: PeriodExpr
+
+
+class DaysMinRevenueQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["days_min_revenue"] = "days_min_revenue"
+    x: int = Field(ge=0)
+    op: ThresholdOp
+    period: PeriodExpr
+
+
 class NoneQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -104,6 +148,10 @@ ExtQuerySpec = Annotated[
     | ProductsInMinOrdersQuery
     | PriceOnDateQuery
     | PriceIncreaseEffectQuery
+    | CustomersMinOrdersQuery
+    | TopCustomersQuery
+    | OrdersMinAmountQuery
+    | DaysMinRevenueQuery
     | NoneQuery,
     Field(discriminator="family"),
 ]
@@ -115,4 +163,11 @@ E4A_FAMILIES: tuple[str, ...] = (
     "products_in_min_orders",
     "price_on_date",
     "price_increase_effect",
+)
+
+E4B_FAMILIES: tuple[str, ...] = (
+    "customers_min_orders",
+    "top_customers",
+    "orders_min_amount",
+    "days_min_revenue",
 )

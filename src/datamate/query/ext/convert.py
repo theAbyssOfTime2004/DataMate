@@ -9,12 +9,16 @@ from pydantic import TypeAdapter, ValidationError
 
 from datamate.query.convert import ConvertError, period_from_raw
 from datamate.query.ext.spec import (
+    CustomersMinOrdersQuery,
+    DaysMinRevenueQuery,
     ExtQuerySpec,
     NoneQuery,
+    OrdersMinAmountQuery,
     PriceIncreaseEffectQuery,
     PriceOnDateQuery,
     ProductsInMinOrdersQuery,
     QtySoldQuery,
+    TopCustomersQuery,
     TopProductsQuery,
     UnsoldProductsQuery,
 )
@@ -112,12 +116,43 @@ def to_ext_query_spec(
             parsed.get("period"), as_of
         )
         return PriceIncreaseEffectQuery(product=product, n_days=n_days, date=date)
+    if family == "customers_min_orders":
+        period = _need_period(parsed.get("period"), as_of, "period")
+        n = _need_int(parsed.get("n"), "n")
+        output = _resolve_count_or_share(parsed.get("output"))
+        return CustomersMinOrdersQuery(n=n, output=output, period=period)  # type: ignore[arg-type]
+    if family == "top_customers":
+        period = _need_period(parsed.get("period"), as_of, "period")
+        k = _need_int(parsed.get("k"), "k")
+        by = parsed.get("by")
+        mode = parsed.get("mode") or "max"
+        if by not in {"revenue", "order_count"}:
+            raise ConvertError(f"top_customers by must be revenue|order_count, got {by!r}")
+        if mode not in {"max", "min"}:
+            raise ConvertError(f"top_customers mode must be max|min, got {mode!r}")
+        return TopCustomersQuery(k=k, by=by, mode=mode, period=period)  # type: ignore[arg-type]
+    if family == "orders_min_amount":
+        period = _need_period(parsed.get("period"), as_of, "period")
+        x = _need_money(parsed.get("x"), "x")
+        op = _need_op(parsed.get("op"))
+        return OrdersMinAmountQuery(x=x, op=op, period=period)  # type: ignore[arg-type]
+    if family == "days_min_revenue":
+        period = _need_period(parsed.get("period"), as_of, "period")
+        x = _need_money(parsed.get("x"), "x")
+        op = _need_op(parsed.get("op"))
+        return DaysMinRevenueQuery(x=x, op=op, period=period)  # type: ignore[arg-type]
     raise ConvertError(f"unknown family {family!r}")
 
 
 def _resolve_count_or_list(raw: object) -> str:
     """Trust the parser's output field; default to count when missing."""
     if raw in {"count", "list"}:
+        return str(raw)
+    return "count"
+
+
+def _resolve_count_or_share(raw: object) -> str:
+    if raw in {"count", "share"}:
         return str(raw)
     return "count"
 
@@ -153,6 +188,20 @@ def _need_int(value: object, field: str) -> int:
     if value < 1:
         raise ConvertError(f"{field} must be >= 1")
     return value
+
+
+def _need_money(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConvertError(f"{field} must be an integer (VND)")
+    if value < 0:
+        raise ConvertError(f"{field} must be >= 0")
+    return value
+
+
+def _need_op(value: object) -> str:
+    if value not in {">=", ">"}:
+        raise ConvertError(f"op must be >= or >, got {value!r}")
+    return str(value)
 
 
 def _optional_str(value: object) -> str | None:

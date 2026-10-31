@@ -596,6 +596,27 @@ def _resolve_customer_fields(
     return norm_id, False
 
 
+def _walk_in_norm_set(values: list[str]) -> set[str]:
+    """Normalized walk-in labels plus the initials of multi-word ones ("khách lẻ" -> "kl").
+
+    Shops often abbreviate the walk-in label and the mapping step does not always list
+    the abbreviation next to the full label.
+    """
+    found: set[str] = set()
+    for value in values:
+        label = normalize_label(value)
+        if label is None:
+            continue
+        found.add(label)
+        folded = "".join(
+            ch for ch in unicodedata.normalize("NFD", label) if unicodedata.category(ch) != "Mn"
+        ).replace("đ", "d")
+        words = folded.split()
+        if len(words) >= 2:
+            found.add("".join(word[0] for word in words))
+    return found
+
+
 def _synthetic_order_id(file_name: str, sheet_name: str | None, row_no: int) -> str:
     sheet = sheet_name if isinstance(sheet_name, str) else ""
     return f"{file_name}|{sheet}|{row_no}"
@@ -974,9 +995,7 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
         if nk is not None:
             norm_status_map[nk] = v
 
-    walk_in_norm_set: set[str] = {
-        nk for v in mapping.walk_in_values if (nk := normalize_label(v)) is not None
-    }
+    walk_in_norm_set = _walk_in_norm_set(mapping.walk_in_values)
 
     orders_with_negative_qty: set[str] = {
         pl["order_id"]

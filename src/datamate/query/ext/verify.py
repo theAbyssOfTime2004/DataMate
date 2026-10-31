@@ -23,7 +23,8 @@ _SYSTEM = "\n".join(  # noqa: FLY002
         "description lacks or contradicts: a different number, product, product group, brand,",
         "size or unit; money instead of quantity or the reverse; stock, purchases or",
         "deliveries instead of sales; a specific customer, channel or payment method;",
-        "a count instead of a list or the reverse; a different period or day.",
+        "a count instead of a list or share, or the reverse; a different threshold or",
+        "operator; customers instead of products or the reverse; a different period or day.",
         "A unit word in the question (kg, ly, hop, dia, ...) only names how the product is",
         "counted; it matches unless the description counts in a different unit.",
         "Otherwise answer yes. Reply with one word: yes or no.",
@@ -43,6 +44,12 @@ def _desc(*lines: str) -> str:
 
 
 _PLAIN = "not filtered by: delivery status, customer, payment method, channel"
+_CUST_PLAIN = "not filtered by: product, channel, payment method, delivery status"
+_THRESH_PLAIN = (
+    "not filtered by: product, customer, channel, payment method, delivery status"
+)
+_WHO_CODE = "customers identified by customer code, walk-in orders excluded"
+_WHO_NAME = "customers identified by name on the order, walk-in orders excluded"
 
 # One yes and one no per family, invented shops and wording (no train/public text).
 # Each "no" shows one generic mismatch kind; never add a shot to fix one dev question.
@@ -195,6 +202,92 @@ VERIFY_FEW_SHOTS: tuple[VerifyExample, ...] = (
         ),
         answer="no",
     ),
+    VerifyExample(
+        question="Thang Nam, trong so khach co mua o tiem Sen, may phan tram quay lai tu 5 lan tro len",
+        description=_desc(
+            "measure: customers with at least 5 revenue orders in the period",
+            f"customers: {_WHO_CODE}",
+            _CUST_PLAIN,
+            "period: 2025-05-01 .. 2025-05-31 (order date)",
+            "output: percent = those customers / all customers who bought in the period x 100",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Khach ghe tiem Sen tu 5 lan tro len trong thang Nam chiem may phan tram tong khach",
+        description=_desc(
+            "measure: customers with at least 5 revenue orders in the period",
+            f"customers: {_WHO_CODE}",
+            _CUST_PLAIN,
+            "period: 2025-05-01 .. 2025-05-31 (order date)",
+            "output: count of customers",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="Tuan nay o tiem Sen ai chi tieu cao nhat",
+        description=_desc(
+            "measure: money revenue",
+            f"customers: {_WHO_NAME}",
+            _CUST_PLAIN,
+            "period: 2025-07-07 .. 2025-07-13 (order date)",
+            "output: one name (highest by money revenue, tie by code or name)",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Tuan nay o tiem Sen ai dat nhieu hoa don nhat",
+        description=_desc(
+            "measure: money revenue",
+            f"customers: {_WHO_NAME}",
+            _CUST_PLAIN,
+            "period: 2025-07-07 .. 2025-07-13 (order date)",
+            "output: one name (highest by money revenue, tie by code or name)",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="Thang Tu tiem Sen co bao nhieu bill tu 312 nghin tro len",
+        description=_desc(
+            "measure: count of revenue orders whose order revenue >= 312000 VND",
+            _THRESH_PLAIN,
+            "period: 2025-04-01 .. 2025-04-30 (order date)",
+            "output: one number (order count)",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Thang Ba tiem Sen co bao nhieu bill tu 312 nghin tro len",
+        description=_desc(
+            "measure: count of revenue orders whose order revenue >= 312000 VND",
+            _THRESH_PLAIN,
+            "period: 2025-04-01 .. 2025-04-30 (order date)",
+            "output: one number (order count)",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="Thang Sau co may ngay tiem Sen thu ve tren 2,1 trieu",
+        description=_desc(
+            "measure: count of days whose revenue > 2100000 VND "
+            "(days with no orders never qualify)",
+            _THRESH_PLAIN,
+            "period: 2025-06-01 .. 2025-06-30 (order date)",
+            "output: one number (day count)",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Thang Sau co may ngay tiem Sen thu ve tren 21 trieu",
+        description=_desc(
+            "measure: count of days whose revenue > 2100000 VND "
+            "(days with no orders never qualify)",
+            _THRESH_PLAIN,
+            "period: 2025-06-01 .. 2025-06-30 (order date)",
+            "output: one number (day count)",
+        ),
+        answer="no",
+    ),
 )
 
 
@@ -206,9 +299,17 @@ def verify_ext_spec(
     cal: LunarCalendar,
     as_of: datetime.date,
     product_unit: str | None = None,
+    customer_who: str | None = None,
 ) -> tuple[float, str]:
     """Return (p_yes, description)."""
-    description = describe_ext_spec(spec, as_of, rules, cal, product_unit=product_unit)
+    description = describe_ext_spec(
+        spec,
+        as_of,
+        rules,
+        cal,
+        product_unit=product_unit,
+        customer_who=customer_who,
+    )
     messages = _build_messages(question, description, few_shot=settings.ext_verify_few_shot)
     probs = client.chat_choice_probs(messages, list(_CHOICES))
     return float(probs.get("yes", 0.0)), description
