@@ -14,6 +14,8 @@ ENV HF_HUB_OFFLINE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONPATH=/app \
+    DATAMATE_PROJECT_ROOT=/app \
+    VLLM_USE_FLASHINFER_SAMPLER=0 \
     LLM_BASE_URL=http://127.0.0.1:8000/v1 \
     LLM_MODEL=qwen3-14b \
     LLM_API_KEY=EMPTY \
@@ -29,7 +31,7 @@ COPY evals /app/evals
 COPY rules /app/rules
 # Same interpreter as vLLM; the package only needs light deps (duckdb, pandas, pydantic...).
 RUN python3 -m pip install --no-cache-dir . \
-    && python3 -c "import datamate, duckdb, vllm; print('ok', vllm.__version__)"
+    && python3 -c "import duckdb, vllm; from datamate.config import PROJECT_ROOT as R; assert (R / 'rules' / 'train.json').is_file(), R; print('ok', vllm.__version__, R)"
 
 # Weights downloaded by docker/fetch_model.sh (not in git).
 COPY docker/models /models

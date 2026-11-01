@@ -1,9 +1,12 @@
+import os
 from pathlib import Path
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# Repo root (rules/, .env). An installed package lives in site-packages, so the Docker image
+# sets DATAMATE_PROJECT_ROOT=/app.
+PROJECT_ROOT = Path(os.environ.get("DATAMATE_PROJECT_ROOT") or Path(__file__).resolve().parents[2])
 
 
 def _default_enabled_families() -> list[str]:

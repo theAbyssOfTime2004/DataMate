@@ -9,7 +9,9 @@ MODEL_DIR="${DATAMATE_MODEL_DIR:-/models/Qwen3-14B-FP8}"
 SERVED_NAME="${LLM_MODEL:-qwen3-14b}"
 WORKERS="${DATAMATE_WORKERS:-8}"
 TIME_BUDGET_S="${DATAMATE_TIME_BUDGET_S:-18900}"
-TP_SIZE="${DATAMATE_TP_SIZE:-2}"
+TP_SIZE="${DATAMATE_TP_SIZE:-1}"  # 14B FP8 fits one 32 GB card; tp=1 needs no NCCL or big /dev/shm
+GPU_UTIL="${DATAMATE_GPU_UTIL:-0.90}"
+MAX_SEQS="${DATAMATE_MAX_NUM_SEQS:-16}"
 VLLM_PORT="${DATAMATE_VLLM_PORT:-8000}"
 VLLM_WAIT_S="${DATAMATE_VLLM_WAIT_S:-900}"
 
@@ -17,6 +19,8 @@ mkdir -p "${OUT_DIR}" "${OUT_DIR}/logs" "${OUT_DIR}/work"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export VLLM_NO_USAGE_STATS=1
+# No nvcc in the runtime image, so FlashInfer cannot JIT its sampler; use the PyTorch one.
+export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
 export LLM_BASE_URL="http://127.0.0.1:${VLLM_PORT}/v1"
 export LLM_MODEL="${SERVED_NAME}"
 export LLM_API_KEY="${LLM_API_KEY:-EMPTY}"
@@ -69,7 +73,8 @@ vllm serve "${MODEL_DIR}" \
   --port "${VLLM_PORT}" \
   --tensor-parallel-size "${TP_SIZE}" \
   --max-model-len 8192 \
-  --gpu-memory-utilization 0.90 \
+  --gpu-memory-utilization "${GPU_UTIL}" \
+  --max-num-seqs "${MAX_SEQS}" \
   --seed 0 \
   --enable-prefix-caching \
   >"${OUT_DIR}/vllm.log" 2>&1 &
