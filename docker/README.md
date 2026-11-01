@@ -24,7 +24,7 @@ Base: `vllm/vllm-openai:v0.32.0` (same vLLM as `deploy/modal_vllm.py` and the lo
 Mount the **split directory** (the folder that contains `questions.jsonl`, `data/`, `calendar.csv`) at `/data`, and a writable folder at `/result`:
 
 ```bash
-docker run --rm --network none --gpus all \
+docker run --rm -it --network none --gpus all \
   -v /path/to/public_test:/data:ro \
   -v /path/to/out:/result \
   datamate:e5

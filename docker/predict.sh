@@ -52,13 +52,21 @@ PY
 }
 
 VLLM_PID=""
+PREDICT_PID=""
 cleanup() {
+  if [[ -n "${PREDICT_PID}" ]] && kill -0 "${PREDICT_PID}" 2>/dev/null; then
+    kill "${PREDICT_PID}" 2>/dev/null || true
+    wait "${PREDICT_PID}" 2>/dev/null || true
+  fi
   if [[ -n "${VLLM_PID}" ]] && kill -0 "${VLLM_PID}" 2>/dev/null; then
     kill "${VLLM_PID}" 2>/dev/null || true
     wait "${VLLM_PID}" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT
+# PID 1 in the container: stop vLLM and exit on Ctrl+C / `docker stop`.
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 if [[ ! -d "${MODEL_DIR}" ]]; then
   echo "ERROR: model dir missing: ${MODEL_DIR}" >&2
@@ -104,12 +112,16 @@ fi
 
 echo "vLLM ready; running predict ..."
 set +e
+# Run in the background and `wait`, so INT/TERM traps fire while predict is running.
 python3 -m datamate.predict \
   --data-dir "${DATA_DIR}" \
   --out-dir "${OUT_DIR}" \
   --workers "${WORKERS}" \
-  --time-budget-s "${TIME_BUDGET_S}"
+  --time-budget-s "${TIME_BUDGET_S}" &
+PREDICT_PID=$!
+wait "${PREDICT_PID}"
 predict_rc=$?
+PREDICT_PID=""
 set -e
 
 cleanup
