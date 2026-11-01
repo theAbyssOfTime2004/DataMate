@@ -11,6 +11,7 @@ import pytest
 from datamate.config import settings
 from datamate.query.ext.prompts import EXT_FEW_SHOT_SETS
 from datamate.query.ext.verify import VERIFY_FEW_SHOTS
+from datamate.query.plan import parse as plan_parse
 from datamate.query.prompts import FEW_SHOT_SETS
 from datamate.rules import from_rulebook as rulebook_prompts
 
@@ -61,3 +62,10 @@ def test_few_shot_questions_stay_below_the_train_similarity_cutoff() -> None:
         left = _normalise(bit)
         closest = max(SequenceMatcher(None, left, right).ratio() for right in references)
         assert closest < 0.80, f"rulebook few-shot {bit!r} similarity {closest:.3f}"
+
+    # E3 plan compose few-shots (invented English questions/definitions).
+    for question, note, _plan in plan_parse._COMPOSE_FEW_SHOTS:
+        for bit in (question, note):
+            left = _normalise(bit)
+            closest = max(SequenceMatcher(None, left, right).ratio() for right in references)
+            assert closest < 0.80, f"plan few-shot {bit!r} similarity {closest:.3f}"

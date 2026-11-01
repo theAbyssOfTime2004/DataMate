@@ -72,6 +72,13 @@ class Settings(BaseSettings):
     ext_verify_few_shot: bool = True
     # When set, pipeline loads this JSON as RuleConfig and skips rulebook.md LLM extract.
     rules_override_path: Path | None = None
+    # E3 composed query plans (after main + ext both out of scope). Off: dev 4/4 but val 0/7
+    # answered (the verifier accepts plans that drop conditions like "cancelled" or
+    # "delivery batches" in misspelled questions).
+    enable_plan_path: bool = False
+    plan_verify_threshold: float = 0.9
+    plan_sql_timeout_s: float = 5.0
+    plan_enable_thinking: bool = False
 
     @field_validator("cache_dir", "runs_dir", "rules_override_path", mode="after")
     @classmethod

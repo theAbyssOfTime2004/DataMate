@@ -50,6 +50,11 @@ def main(argv: list[str] | None = None) -> int:
         default="dev",
     )
     parser.add_argument("--run", default="", help="Run directory (default: latest under runs/)")
+    parser.add_argument(
+        "--detail",
+        action="store_true",
+        help="Also print plan:<entity>/<measure> breakdown for E3 plan answers",
+    )
     args = parser.parse_args(argv)
 
     run_dir = Path(args.run) if args.run.strip() else _latest_run(settings.runs_dir)
@@ -88,20 +93,29 @@ def main(argv: list[str] | None = None) -> int:
             continue
         family = trace.get("ext_family")
         bucket = "main_path" if not family else str(family)
-        row = stats[bucket]
-        row["n"] += 1
+        buckets = [bucket]
+        if bucket == "plan" and args.detail:
+            plan = trace.get("plan") or {}
+            entity = plan.get("entity") or "?"
+            measure = plan.get("measure") or "?"
+            buckets.append(f"plan:{entity}/{measure}")
         ans_type = submitted.get("type")
-        if ans_type in (None, "abstain"):
-            row["abstain"] += 1
-            if trace.get("abstain_reason") == "ext_verify_low":
-                row["verify_abstain"] += 1
-            continue
-        row["answered"] += 1
-        points = score_one(submitted, ref)
-        if points > 0:
-            row["correct"] += 1
-        else:
-            row["wrong"] += 1
+        is_abstain = ans_type in (None, "abstain")
+        points = 0 if is_abstain else score_one(submitted, ref)
+        verify_low = trace.get("abstain_reason") in {"ext_verify_low", "plan_verify_low"}
+        for name in buckets:
+            row = stats[name]
+            row["n"] += 1
+            if is_abstain:
+                row["abstain"] += 1
+                if verify_low:
+                    row["verify_abstain"] += 1
+                continue
+            row["answered"] += 1
+            if points > 0:
+                row["correct"] += 1
+            else:
+                row["wrong"] += 1
 
     print(f"run: {run_dir}")
     print(f"split={args.split} subset={args.subset}")

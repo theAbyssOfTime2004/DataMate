@@ -227,12 +227,16 @@ class PipelineSystem:
         trace["ext_parse_attempts"] = [_attempt_dict(item) for item in ext.attempts]
         if ext.spec is None:
             trace["ext_family"] = None
+            if settings.enable_plan_path and (ext.reason or "out_of_scope") == "out_of_scope":
+                return self._answer_via_plan(question, bundle, trace, wall_t0)
             trace["abstain_reason"] = ext.reason or "out_of_scope"
             trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
             return Answer.abstain(), trace
         family = ext.spec.family
         trace["ext_family"] = family
         if family == "none" or family not in settings.enabled_families:
+            if settings.enable_plan_path and family == "none":
+                return self._answer_via_plan(question, bundle, trace, wall_t0)
             trace["abstain_reason"] = "out_of_scope"
             trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
             return Answer.abstain(), trace
@@ -315,6 +319,78 @@ class PipelineSystem:
         elif answer.type == "unanswerable":
             trace["abstain_reason"] = None
             trace["unanswerable_reason"] = answer.reason
+        trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
+        return answer, trace
+
+    def _answer_via_plan(
+        self,
+        question: Question,
+        bundle: _BusinessBundle,
+        trace: dict[str, Any],
+        wall_t0: float,
+    ) -> tuple[Answer, dict[str, Any]]:
+        """E3: compose a QueryPlan when main + ext are both out of scope."""
+        assert bundle.engine is not None and bundle.context is not None
+        from datamate.query.ext.verify import verify_description
+        from datamate.query.plan.describe import describe_plan
+        from datamate.query.plan.execute import try_answer_plan
+        from datamate.query.plan.parse import parse_plan_question
+
+        trace["ext_family"] = "plan"
+        plan_t0 = time.perf_counter()
+        parsed = parse_plan_question(
+            question.question,
+            bundle.context,
+            self.client,
+            bundle.rules,
+            bundle.calendar,
+            question.as_of_date,
+            list(bundle.rule_notes),
+        )
+        trace["timings"]["plan_parse_s"] = round(time.perf_counter() - plan_t0, 6)
+        trace["plan_selected_notes"] = list(parsed.selected_note_ids)
+        if parsed.notes_error is not None:
+            trace["plan_notes_error"] = parsed.notes_error
+        trace["plan_parse_attempts"] = [_attempt_dict(item) for item in parsed.attempts]
+        if parsed.plan is None:
+            trace["abstain_reason"] = parsed.reason or "plan_parse_error"
+            trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
+            return Answer.abstain(), trace
+
+        trace["plan"] = parsed.plan.model_dump(mode="json")
+        description = describe_plan(
+            parsed.plan, question.as_of_date, bundle.rules, bundle.calendar
+        )
+        verify_t0 = time.perf_counter()
+        p_yes = verify_description(question.question, description, self.client)
+        trace["timings"]["plan_verify_s"] = round(time.perf_counter() - verify_t0, 6)
+        trace["plan_verify_p"] = round(p_yes, 4)
+        trace["plan_verify_description"] = description
+        if p_yes < settings.plan_verify_threshold:
+            trace["abstain_reason"] = "plan_verify_low"
+            trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
+            return Answer.abstain(), trace
+
+        engine_t0 = time.perf_counter()
+        with bundle.lock:
+            answer, compiled, err = try_answer_plan(
+                parsed.plan, bundle.engine, question.as_of_date
+            )
+        trace["timings"]["plan_engine_s"] = round(time.perf_counter() - engine_t0, 6)
+        if compiled is not None:
+            trace["plan_sql"] = compiled.sql
+            trace["plan_answer_type"] = compiled.answer_type
+        if err is not None:
+            trace["abstain_reason"] = err
+            trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
+            return Answer.abstain(), trace
+        if answer.type == "abstain":
+            trace["abstain_reason"] = "plan_engine_abstain"
+        elif answer.type == "unanswerable":
+            trace["abstain_reason"] = None
+            trace["unanswerable_reason"] = answer.reason
+        else:
+            trace["abstain_reason"] = None
         trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
         return answer, trace
 

@@ -678,6 +678,20 @@ VERIFY_FEW_SHOTS: tuple[VerifyExample, ...] = (
 )
 
 
+def verify_description(
+    question: str,
+    description: str,
+    client: Any,
+    *,
+    few_shot: bool | None = None,
+) -> float:
+    """Return p_yes for a pre-built description (ext families or E3 plans)."""
+    use_few = settings.ext_verify_few_shot if few_shot is None else few_shot
+    messages = _build_messages(question, description, few_shot=use_few)
+    probs = client.chat_choice_probs(messages, list(_CHOICES))
+    return float(probs.get("yes", 0.0))
+
+
 def verify_ext_spec(
     question: str,
     spec: ExtQuerySpec,
@@ -699,9 +713,7 @@ def verify_ext_spec(
         customer_who=customer_who,
         debt_meta=debt_meta,
     )
-    messages = _build_messages(question, description, few_shot=settings.ext_verify_few_shot)
-    probs = client.chat_choice_probs(messages, list(_CHOICES))
-    return float(probs.get("yes", 0.0)), description
+    return verify_description(question, description, client), description
 
 
 def _build_messages(

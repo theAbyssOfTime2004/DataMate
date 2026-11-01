@@ -103,7 +103,10 @@ class LLMClient:
         messages: list[dict[str, str]],
         schema: dict[str, Any],
         max_tokens: int,
+        *,
+        thinking_off: bool | None = None,
     ) -> tuple[str, dict[str, Any]]:
+        disable = self.disable_thinking if thinking_off is None else thinking_off
         canonical_req: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -113,7 +116,7 @@ class LLMClient:
             "max_tokens": max_tokens,
         }
         # Only when set: keeps every existing 4B cache entry keyed without this field.
-        if self.disable_thinking:
+        if disable:
             canonical_req["chat_template_kwargs"] = {"enable_thinking": False}
         dumped = json.dumps(canonical_req, sort_keys=True, ensure_ascii=False)
         key = hashlib.sha256(dumped.encode("utf-8")).hexdigest()
@@ -332,9 +335,14 @@ class LLMClient:
         schema_name: str,
         max_tokens: int | None = None,
         required_keys: list[str] | None = None,
+        enable_thinking: bool | None = None,
     ) -> dict[str, Any]:
         resolved_max_tokens = max_tokens if max_tokens is not None else self.max_output_tokens
-        key, canonical_req = self._compute_cache_key(messages, schema, resolved_max_tokens)
+        # Per-call override (E3 plan compose); None keeps the client default.
+        thinking_off = self.disable_thinking if enable_thinking is None else not enable_thinking
+        key, canonical_req = self._compute_cache_key(
+            messages, schema, resolved_max_tokens, thinking_off=thinking_off
+        )
 
         t0 = time.perf_counter()
         cached = self._read_cache(key)
@@ -367,7 +375,7 @@ class LLMClient:
                 },
             },
         }
-        if self.disable_thinking:
+        if thinking_off:
             body["chat_template_kwargs"] = {"enable_thinking": False}
 
         resp, retried = self._post_with_timeout_retry(
