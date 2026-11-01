@@ -926,6 +926,22 @@ def _debts_snapshot_usable(engine: MetricEngine, as_of_day: datetime.date) -> bo
     return row is not None
 
 
+def _require_reliable_payable(engine: MetricEngine) -> None:
+    """Abstain when the order total cannot be trusted: an order never owes more than its
+    total, so many orders with amount_due > order_payable mean the payable column holds
+    something else (e.g. the amount already paid)."""
+    if not _ext_recorded(engine, "orders", "amount_due"):
+        return
+    row = engine.con.execute(
+        "SELECT COUNT(*) FILTER (WHERE amount_due > 0), "
+        "COUNT(*) FILTER (WHERE amount_due > order_payable + 1) "
+        "FROM orders WHERE order_payable IS NOT NULL"
+    ).fetchone()
+    owing, broken = (int(row[0] or 0), int(row[1] or 0)) if row else (0, 0)
+    if broken > 0 and broken * 10 >= owing:
+        raise _Abstain()
+
+
 def _require_debt_inputs(engine: MetricEngine) -> None:
     from datamate.metrics.engine import Unanswerable
 
@@ -1023,6 +1039,7 @@ def _debt_rows_at(
 ) -> list[_DebtOrderRow]:
     """Debt-eligible orders with remaining > 0 at end of as_of_day."""
     _require_debt_inputs(engine)
+    _require_reliable_payable(engine)
     mode = _detect_customer_mode(engine)
     excl_sql, excl_params = _debt_not_excluded_sql(engine)
 
@@ -1199,6 +1216,7 @@ def _debt_added(
     engine: MetricEngine, spec: DebtAddedQuery, as_of: datetime.date
 ) -> Answer:
     _require_debt_inputs(engine)
+    _require_reliable_payable(engine)
     cov, window = engine._window(spec.period, as_of)
     if cov == "none":
         return Answer.unanswerable("period lies entirely outside the shop's data")

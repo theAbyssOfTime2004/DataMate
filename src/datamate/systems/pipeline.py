@@ -274,7 +274,11 @@ class PipelineSystem:
         trace["timings"]["ext_verify_s"] = round(time.perf_counter() - verify_t0, 6)
         trace["ext_verify_p"] = round(p_yes, 4)
         trace["ext_verify_description"] = description
-        if p_yes < settings.ext_verify_threshold:
+        trace["ext_split_vote"] = ext.split_vote
+        threshold = (
+            settings.ext_verify_threshold_split if ext.split_vote else settings.ext_verify_threshold
+        )
+        if p_yes < threshold:
             trace["abstain_reason"] = "ext_verify_low"
             trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
             return Answer.abstain(), trace

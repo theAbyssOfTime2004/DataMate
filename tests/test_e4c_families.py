@@ -420,3 +420,15 @@ def test_debt_exclusion_matches_labels_inside_shop_values() -> None:
     assert _contains_words(_label_words("sàn tmđt"), _label_words("sàn tmđt"))
     assert not _contains_words(_label_words("codex"), _label_words("cod"))
     assert not _contains_words(_label_words("sân bay"), _label_words("sàn"))
+
+
+def test_debt_abstains_when_amount_due_exceeds_payable(tmp_path: Path) -> None:
+    day = datetime.date(2026, 6, 10)
+    orders = [
+        {**_order("o1", day, payable=120_000, customer_id="KH1"), "amount_due": 168_000},
+        {**_order("o2", day, payable=0, customer_id="KH2"), "amount_due": 50_000},
+    ]
+    payments = [_pay("p1", "o1", day, 120_000)]
+    engine = _engine(tmp_path / "bad.duckdb", orders, payments)
+    total = engine.answer_ext(DebtTotalQuery(date=DayExpr(date=day)), AS_OF)
+    assert total.type == "abstain"

@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     # Ext verifier (E4a-fix4): p_yes >= threshold to compute. Default 0.5 until
     # evals/ext_threshold.py picks a value from train/dev (never from public).
     ext_verify_threshold: float = 0.5
+    # Stricter verifier bar when one ext vote said "none" and the other gave a spec.
+    ext_verify_threshold_split: float = 0.9
     # Verifier prompt with the balanced few-shot set (False = instruction only).
     ext_verify_few_shot: bool = True
 

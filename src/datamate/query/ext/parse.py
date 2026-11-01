@@ -31,6 +31,9 @@ class ExtParseResult:
     spec: ExtQuerySpec | None
     reason: str | None
     attempts: list[ParseAttempt]
+    # True when one vote said "none" and the others agreed on this spec; the pipeline
+    # then asks the verifier for a stricter p_yes (settings.ext_verify_threshold_split).
+    split_vote: bool = False
 
 
 def parse_ext_question(
@@ -169,7 +172,7 @@ def _decide(
     rules: RuleConfig,
     cal: LunarCalendar,
 ) -> ExtParseResult:
-    if any(status == "out" for status, _spec in outcomes):
+    if all(status == "out" for status, _spec in outcomes):
         return ExtParseResult(spec=None, reason="out_of_scope", attempts=attempts)
     if any(status == "fail" for status, _spec in outcomes):
         return ExtParseResult(spec=None, reason="parse_error", attempts=attempts)
@@ -179,7 +182,8 @@ def _decide(
     keys = {ext_semantic_key(spec, as_of, rules, cal) for spec in specs}
     if len(keys) != 1:
         return ExtParseResult(spec=None, reason="disagreement", attempts=attempts)
-    return ExtParseResult(spec=specs[0], reason=None, attempts=attempts)
+    split = any(status == "out" for status, _spec in outcomes)
+    return ExtParseResult(spec=specs[0], reason=None, attempts=attempts, split_vote=split)
 
 
 def ext_semantic_key(

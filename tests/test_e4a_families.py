@@ -939,3 +939,17 @@ def test_cafe_size_filter(tmp_path: Path) -> None:
     schema_plain = ext_parsed_schema(ctx_plain, ["Trà xanh"])
     assert schema_plain["properties"]["size"] == {"enum": [None]}
     con.close()
+
+
+def test_ext_decide_accepts_split_vote_with_flag() -> None:
+    from datamate.query.ext.parse import _decide
+
+    as_of = datetime.date(2026, 6, 30)
+    spec = UnsoldProductsQuery(output="count", period=MonthExpr(month=6, year=2026))
+    result = _decide([("ok", spec), ("out", None)], [], as_of, RuleConfig(), LunarCalendar({}))
+    assert result.spec == spec
+    assert result.split_vote is True
+    both = _decide([("ok", spec), ("ok", spec)], [], as_of, RuleConfig(), LunarCalendar({}))
+    assert both.split_vote is False
+    none = _decide([("out", None), ("out", None)], [], as_of, RuleConfig(), LunarCalendar({}))
+    assert none.spec is None and none.reason == "out_of_scope"
