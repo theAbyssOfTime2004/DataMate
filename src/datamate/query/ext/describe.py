@@ -6,6 +6,7 @@ import datetime
 
 from datamate.query.ext.spec import (
     AgingBucket,
+    AvgPurchaseCostQuery,
     CustomersMinOrdersQuery,
     DaysMinRevenueQuery,
     DebtAddedQuery,
@@ -13,15 +14,27 @@ from datamate.query.ext.spec import (
     DebtCollectedQuery,
     DebtTotalQuery,
     ExtQuerySpec,
+    GrossProfitQuery,
+    IngredientRevenueQuery,
+    LotsExpiringQuery,
+    NearestExpiryLotQuery,
+    NetProfitQuery,
     NoneQuery,
     OrdersMinAmountQuery,
+    OutOfStockCountQuery,
     PriceIncreaseEffectQuery,
     PriceOnDateQuery,
     ProductsInMinOrdersQuery,
+    PurchaseTotalQuery,
     QtySoldQuery,
+    RxShareQuery,
+    StockOnHandQuery,
+    StockValueQuery,
     TopCustomersQuery,
     TopDebtorsQuery,
+    TopEmployeeQuery,
     TopProductsQuery,
+    TopSupplierQuery,
     UnsoldProductsQuery,
 )
 from datamate.rules.model import RuleConfig
@@ -200,6 +213,118 @@ def describe_ext_spec(
             f"excluded orders: cancelled; COD/marketplace labels in this shop: {excl}",
             _period_line(spec.period, as_of, rules, cal),
             "output: one number (VND)",
+        )
+    if isinstance(spec, PurchaseTotalQuery):
+        return _lines(
+            "measure: money the shop paid suppliers for goods bought in (sum of purchase receipt "
+            "totals); not sales, not deliveries to customers, not a count",
+            "source: purchases table (cancelled receipts excluded)",
+            f"period: {_period_span(spec.period, as_of, rules, cal)} (receipt date)",
+            "output: one number (VND)",
+        )
+    if isinstance(spec, TopSupplierQuery):
+        return _lines(
+            "measure: supplier with the highest purchase receipt total",
+            "source: purchases table (cancelled receipts excluded)",
+            f"period: {_period_span(spec.period, as_of, rules, cal)} (receipt date)",
+            "output: one supplier name",
+        )
+    if isinstance(spec, AvgPurchaseCostQuery):
+        return _lines(
+            "measure: quantity-weighted average purchase unit cost",
+            f'product: "{spec.product}"',
+            "source: purchase_lines (cancelled receipts excluded)",
+            f"period: {_period_span(spec.period, as_of, rules, cal)} (receipt date)",
+            "output: one number (VND per purchase unit)",
+        )
+    if isinstance(spec, StockOnHandQuery):
+        unit_line = (
+            f'unit: "{spec.unit}" (big unit -> [whole, leftover base units])'
+            if spec.unit
+            else f'unit: base unit{f" ({product_unit})" if product_unit else ""}'
+        )
+        return _lines(
+            "measure: on-hand stock at end of day",
+            f'product: "{spec.product}"',
+            unit_line,
+            "source: stock_moves balance, else stock_snapshot on that date",
+            f"as-of: end of {_period_span(spec.date, as_of, rules, cal)}",
+            "output: one number (base) or list [whole big units, leftover base]",
+        )
+    if isinstance(spec, StockValueQuery):
+        return _lines(
+            "measure: sum of on-hand base qty * products.unit_cost for stock > 0",
+            "source: stock_moves/snapshot and products.unit_cost",
+            f"as-of: end of {_period_span(spec.date, as_of, rules, cal)}",
+            "output: one number (VND)",
+        )
+    if isinstance(spec, OutOfStockCountQuery):
+        return _lines(
+            "measure: count of resale products (seen in purchase_lines) with end-of-day stock 0",
+            "source: purchase_lines + stock_moves/snapshot",
+            f"day: {_period_span(spec.date, as_of, rules, cal)}",
+            "output: one number (product count)",
+        )
+    if isinstance(spec, LotsExpiringQuery):
+        out = {
+            "count": "count of lots",
+            "list": "list of product names",
+            "cost": "one number (VND cost of remaining qty)",
+        }[spec.output]
+        return _lines(
+            f"measure: lots still in stock expiring within {spec.n_days} days",
+            "source: lots minus sale_lots up to as-of; cost uses each lot's unit_cost",
+            f"as-of: end of {_period_span(spec.date, as_of, rules, cal)}",
+            f"output: {out}",
+        )
+    if isinstance(spec, NearestExpiryLotQuery):
+        day = (
+            _period_span(spec.date, as_of, rules, cal)
+            if spec.date is not None
+            else as_of.isoformat()
+        )
+        return _lines(
+            "measure: earliest-expiring lot still in stock and not yet expired",
+            f'product: "{spec.product}"',
+            "source: lots minus sale_lots up to as-of",
+            f"as-of: end of {day}",
+            "output: one lot id",
+        )
+    if isinstance(spec, IngredientRevenueQuery):
+        return _lines(
+            "measure: revenue of products with this exact active ingredient",
+            f'active_ingredient: "{spec.active_ingredient}"',
+            "source: order_lines revenue + drug_info (combined ingredients are separate)",
+            _period_line(spec.period, as_of, rules, cal),
+            "output: one number (VND)",
+        )
+    if isinstance(spec, RxShareQuery):
+        return _lines(
+            "measure: prescription (Rx) revenue / total revenue x 100",
+            "source: order_lines revenue + drug_info.is_prescription",
+            _period_line(spec.period, as_of, rules, cal),
+            "output: one percent",
+        )
+    if isinstance(spec, GrossProfitQuery):
+        return _lines(
+            "measure: revenue minus qty * cost_per_unit on revenue lines",
+            "source: order_lines (cost_per_unit on the sold unit)",
+            _period_line(spec.period, as_of, rules, cal),
+            "output: one number (VND)",
+        )
+    if isinstance(spec, NetProfitQuery):
+        return _lines(
+            "measure: gross profit minus all expenses dated in the period",
+            "source: order_lines cost_per_unit + expenses table",
+            _period_line(spec.period, as_of, rules, cal),
+            "output: one number (VND)",
+        )
+    if isinstance(spec, TopEmployeeQuery):
+        return _lines(
+            "measure: employee with the highest revenue",
+            "source: orders.employee_id + order_lines revenue",
+            _period_line(spec.period, as_of, rules, cal),
+            "output: one employee name",
         )
     raise TypeError(f"unsupported ext spec {spec!r}")
 

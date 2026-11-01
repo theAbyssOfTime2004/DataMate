@@ -10,6 +10,7 @@ from pydantic import TypeAdapter, ValidationError
 from datamate.query.convert import ConvertError, period_from_raw
 from datamate.query.ext.spec import (
     AgingBucket,
+    AvgPurchaseCostQuery,
     CustomersMinOrdersQuery,
     DaysMinRevenueQuery,
     DebtAddedQuery,
@@ -17,15 +18,27 @@ from datamate.query.ext.spec import (
     DebtCollectedQuery,
     DebtTotalQuery,
     ExtQuerySpec,
+    GrossProfitQuery,
+    IngredientRevenueQuery,
+    LotsExpiringQuery,
+    NearestExpiryLotQuery,
+    NetProfitQuery,
     NoneQuery,
     OrdersMinAmountQuery,
+    OutOfStockCountQuery,
     PriceIncreaseEffectQuery,
     PriceOnDateQuery,
     ProductsInMinOrdersQuery,
+    PurchaseTotalQuery,
     QtySoldQuery,
+    RxShareQuery,
+    StockOnHandQuery,
+    StockValueQuery,
     TopCustomersQuery,
     TopDebtorsQuery,
+    TopEmployeeQuery,
     TopProductsQuery,
+    TopSupplierQuery,
     UnsoldProductsQuery,
 )
 from datamate.query.grounding import QuestionText
@@ -165,6 +178,62 @@ def to_ext_query_spec(
     if family == "debt_collected":
         period = _need_period(parsed.get("period"), as_of, "period")
         return DebtCollectedQuery(period=period)
+    if family == "purchase_total":
+        period = _need_period(parsed.get("period"), as_of, "period")
+        return PurchaseTotalQuery(period=period)
+    if family == "top_supplier":
+        period = _need_period(parsed.get("period"), as_of, "period")
+        return TopSupplierQuery(period=period)
+    if family == "avg_purchase_cost":
+        if product is None:
+            raise ConvertError("avg_purchase_cost needs product")
+        _require_grounded_product(text, product)
+        period = _need_period(parsed.get("period"), as_of, "period")
+        return AvgPurchaseCostQuery(product=product, period=period)
+    if family == "stock_on_hand":
+        if product is None:
+            raise ConvertError("stock_on_hand needs product")
+        _require_grounded_product(text, product)
+        date = _need_as_of_day(parsed, as_of)
+        unit = _optional_str(parsed.get("unit")) or _optional_str(parsed.get("base_unit"))
+        return StockOnHandQuery(product=product, date=date, unit=unit)
+    if family == "stock_value":
+        date = _need_as_of_day(parsed, as_of)
+        return StockValueQuery(date=date)
+    if family == "out_of_stock_count":
+        date = _need_as_of_day(parsed, as_of)
+        return OutOfStockCountQuery(date=date)
+    if family == "lots_expiring":
+        date = _need_as_of_day(parsed, as_of)
+        n_days = _need_int_ge0(parsed.get("n_days"), "n_days")
+        output = _resolve_count_list_or_cost(parsed.get("output"))
+        return LotsExpiringQuery(date=date, n_days=n_days, output=output)  # type: ignore[arg-type]
+    if family == "nearest_expiry_lot":
+        if product is None:
+            raise ConvertError("nearest_expiry_lot needs product")
+        _require_grounded_product(text, product)
+        date = _single_day_from(parsed.get("date"), as_of) or _single_day_from(
+            parsed.get("period"), as_of
+        )
+        return NearestExpiryLotQuery(product=product, date=date)
+    if family == "ingredient_revenue":
+        ingredient = _optional_str(parsed.get("active_ingredient"))
+        if ingredient is None:
+            raise ConvertError("ingredient_revenue needs active_ingredient")
+        period = _need_period(parsed.get("period"), as_of, "period")
+        return IngredientRevenueQuery(active_ingredient=ingredient, period=period)
+    if family == "rx_share":
+        period = _need_period(parsed.get("period"), as_of, "period")
+        return RxShareQuery(period=period)
+    if family == "gross_profit":
+        period = _need_period(parsed.get("period"), as_of, "period")
+        return GrossProfitQuery(period=period)
+    if family == "net_profit":
+        period = _need_period(parsed.get("period"), as_of, "period")
+        return NetProfitQuery(period=period)
+    if family == "top_employee":
+        period = _need_period(parsed.get("period"), as_of, "period")
+        return TopEmployeeQuery(period=period)
     raise ConvertError(f"unknown family {family!r}")
 
 
@@ -208,6 +277,20 @@ def _resolve_count_or_share(raw: object) -> str:
     if raw in {"count", "share"}:
         return str(raw)
     return "count"
+
+
+def _resolve_count_list_or_cost(raw: object) -> str:
+    if raw in {"count", "list", "cost"}:
+        return str(raw)
+    return "count"
+
+
+def _need_int_ge0(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConvertError(f"{field} must be an integer")
+    if value < 0:
+        raise ConvertError(f"{field} must be >= 0")
+    return value
 
 
 def _single_day_from(raw: object, as_of: datetime.date) -> PeriodExpr | None:

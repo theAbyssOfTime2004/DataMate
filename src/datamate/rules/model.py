@@ -73,6 +73,8 @@ class RuleConfig(BaseModel):
             "san tmdt",
         ]
     )
+    # E4d pharmacy lots (train rulebook §6): expiry window is inclusive of as_of + n_days.
+    lot_expiry_inclusive: bool = True
 
     @field_validator(
         "non_product_line_labels",

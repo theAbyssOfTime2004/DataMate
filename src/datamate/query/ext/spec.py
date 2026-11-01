@@ -24,6 +24,19 @@ ExtFamily = Literal[
     "debt_aging",
     "debt_added",
     "debt_collected",
+    "purchase_total",
+    "top_supplier",
+    "avg_purchase_cost",
+    "stock_on_hand",
+    "stock_value",
+    "out_of_stock_count",
+    "lots_expiring",
+    "nearest_expiry_lot",
+    "ingredient_revenue",
+    "rx_share",
+    "gross_profit",
+    "net_profit",
+    "top_employee",
     "none",
 ]
 
@@ -32,6 +45,7 @@ CustomerTopBy = Literal["revenue", "order_count"]
 TopMode = Literal["max", "min"]
 CountOrList = Literal["count", "list"]
 CountOrShare = Literal["count", "share"]
+CountListOrCost = Literal["count", "list", "cost"]
 ThresholdOp = Literal[">=", ">"]
 CafeSize = Literal["M", "L"]
 
@@ -186,6 +200,104 @@ class DebtCollectedQuery(BaseModel):
     period: PeriodExpr
 
 
+class PurchaseTotalQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["purchase_total"] = "purchase_total"
+    period: PeriodExpr
+
+
+class TopSupplierQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["top_supplier"] = "top_supplier"
+    period: PeriodExpr
+
+
+class AvgPurchaseCostQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["avg_purchase_cost"] = "avg_purchase_cost"
+    product: str
+    period: PeriodExpr  # month
+
+
+class StockOnHandQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["stock_on_hand"] = "stock_on_hand"
+    product: str
+    date: PeriodExpr
+    unit: str | None = None  # None or base -> number; big unit -> [whole, leftover]
+
+
+class StockValueQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["stock_value"] = "stock_value"
+    date: PeriodExpr
+
+
+class OutOfStockCountQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["out_of_stock_count"] = "out_of_stock_count"
+    date: PeriodExpr
+
+
+class LotsExpiringQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["lots_expiring"] = "lots_expiring"
+    date: PeriodExpr
+    n_days: int = Field(ge=0)
+    output: CountListOrCost
+
+
+class NearestExpiryLotQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["nearest_expiry_lot"] = "nearest_expiry_lot"
+    product: str
+    date: PeriodExpr | None = None  # default: as_of of the question
+
+
+class IngredientRevenueQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["ingredient_revenue"] = "ingredient_revenue"
+    active_ingredient: str
+    period: PeriodExpr
+
+
+class RxShareQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["rx_share"] = "rx_share"
+    period: PeriodExpr
+
+
+class GrossProfitQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["gross_profit"] = "gross_profit"
+    period: PeriodExpr
+
+
+class NetProfitQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["net_profit"] = "net_profit"
+    period: PeriodExpr  # month
+
+
+class TopEmployeeQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["top_employee"] = "top_employee"
+    period: PeriodExpr
+
+
 class NoneQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -208,6 +320,19 @@ ExtQuerySpec = Annotated[
     | DebtAgingQuery
     | DebtAddedQuery
     | DebtCollectedQuery
+    | PurchaseTotalQuery
+    | TopSupplierQuery
+    | AvgPurchaseCostQuery
+    | StockOnHandQuery
+    | StockValueQuery
+    | OutOfStockCountQuery
+    | LotsExpiringQuery
+    | NearestExpiryLotQuery
+    | IngredientRevenueQuery
+    | RxShareQuery
+    | GrossProfitQuery
+    | NetProfitQuery
+    | TopEmployeeQuery
     | NoneQuery,
     Field(discriminator="family"),
 ]
@@ -234,4 +359,20 @@ E4C_FAMILIES: tuple[str, ...] = (
     "debt_aging",
     "debt_added",
     "debt_collected",
+)
+
+E4D_FAMILIES: tuple[str, ...] = (
+    "purchase_total",
+    "top_supplier",
+    "avg_purchase_cost",
+    "stock_on_hand",
+    "stock_value",
+    "out_of_stock_count",
+    "lots_expiring",
+    "nearest_expiry_lot",
+    "ingredient_revenue",
+    "rx_share",
+    "gross_profit",
+    "net_profit",
+    "top_employee",
 )

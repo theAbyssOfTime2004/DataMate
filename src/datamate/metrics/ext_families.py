@@ -77,6 +77,11 @@ def answer_ext_family(engine: MetricEngine, spec: ExtQuerySpec, as_of: datetime.
             return _debt_added(engine, spec, as_of)
         if isinstance(spec, DebtCollectedQuery):
             return _debt_collected(engine, spec, as_of)
+        from datamate.metrics.ext_e4d import answer_e4d
+
+        e4d = answer_e4d(engine, spec, as_of)
+        if e4d is not None:
+            return e4d
     except Unanswerable as exc:
         return Answer.unanswerable(str(exc))
     except _Abstain:

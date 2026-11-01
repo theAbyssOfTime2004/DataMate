@@ -23,6 +23,18 @@ def _default_enabled_families() -> list[str]:
         "debt_aging",
         "debt_added",
         "debt_collected",
+        "purchase_total",
+        "top_supplier",
+        "avg_purchase_cost",
+        "stock_on_hand",
+        "stock_value",
+        "ingredient_revenue",
+        "rx_share",
+        "gross_profit",
+        "top_employee",
+        # Off until dev shows >= 90% (no dev question reached them yet; lot remaining also
+        # needs purchase-line lots and returns): out_of_stock_count, lots_expiring,
+        # nearest_expiry_lot, net_profit.
     ]
 
 

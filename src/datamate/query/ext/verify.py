@@ -405,6 +405,276 @@ VERIFY_FEW_SHOTS: tuple[VerifyExample, ...] = (
         ),
         answer="no",
     ),
+    VerifyExample(
+        question="Thang Sau tiem Latte nhap hang tong het bao nhieu tien",
+        description=_desc(
+            "measure: sum of purchase receipt totals",
+            "source: purchases table (cancelled receipts excluded)",
+            "period: 2025-06-01 .. 2025-06-30 (order date)",
+            "output: one number (VND)",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Thang Sau tiem Latte nha cung cap nao nhap nhieu nhat",
+        description=_desc(
+            "measure: sum of purchase receipt totals",
+            "source: purchases table (cancelled receipts excluded)",
+            "period: 2025-06-01 .. 2025-06-30 (order date)",
+            "output: one number (VND)",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="Quy 1 tiem Latte nha cung cap nao mang ve nhieu tien nhap nhat",
+        description=_desc(
+            "measure: supplier with the highest purchase receipt total",
+            "source: purchases table (cancelled receipts excluded)",
+            "period: 2025-01-01 .. 2025-03-31 (order date)",
+            "output: one supplier name",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Quy 1 tiem Latte nhap hang tong bao nhieu",
+        description=_desc(
+            "measure: supplier with the highest purchase receipt total",
+            "source: purchases table (cancelled receipts excluded)",
+            "period: 2025-01-01 .. 2025-03-31 (order date)",
+            "output: one supplier name",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="Gia nhap binh quan mot goi Hat arabica thang 3 o tiem Latte",
+        description=_desc(
+            "measure: quantity-weighted average purchase unit cost",
+            'product: "Hat arabica"',
+            "source: purchase_lines (cancelled receipts excluded)",
+            "period: 2025-03-01 .. 2025-03-31 (order date)",
+            "output: one number (VND per purchase unit)",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Thang 3 tiem Latte ban duoc bao nhieu goi Hat arabica",
+        description=_desc(
+            "measure: quantity-weighted average purchase unit cost",
+            'product: "Hat arabica"',
+            "source: purchase_lines (cancelled receipts excluded)",
+            "period: 2025-03-01 .. 2025-03-31 (order date)",
+            "output: one number (VND per purchase unit)",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="Het hom nay kho tiem Latte con bao nhieu thung Nuoc cam",
+        description=_desc(
+            "measure: on-hand stock at end of day",
+            'product: "Nuoc cam"',
+            'unit: "thung" (big unit -> [whole, leftover base units])',
+            "source: stock_moves balance, else stock_snapshot on that date",
+            "as-of: end of 2025-08-20",
+            "output: one number (base) or list [whole big units, leftover base]",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Het hom nay gia tri hang ton kho tiem Latte bao nhieu",
+        description=_desc(
+            "measure: on-hand stock at end of day",
+            'product: "Nuoc cam"',
+            'unit: "thung" (big unit -> [whole, leftover base units])',
+            "source: stock_moves balance, else stock_snapshot on that date",
+            "as-of: end of 2025-08-20",
+            "output: one number (base) or list [whole big units, leftover base]",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="Gia tri ton kho tiem Latte het ngay 10 thang 4",
+        description=_desc(
+            "measure: sum of on-hand base qty * products.unit_cost for stock > 0",
+            "source: stock_moves/snapshot and products.unit_cost",
+            "as-of: end of 2025-04-10",
+            "output: one number (VND)",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Het ngay 10 thang 4 kho tiem Latte con bao nhieu chai Nuoc cam",
+        description=_desc(
+            "measure: sum of on-hand base qty * products.unit_cost for stock > 0",
+            "source: stock_moves/snapshot and products.unit_cost",
+            "as-of: end of 2025-04-10",
+            "output: one number (VND)",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="Hom qua tiem Latte co may mat hang mua ve de ban ma het sach",
+        description=_desc(
+            "measure: count of resale products (seen in purchase_lines) with end-of-day stock 0",
+            "source: purchase_lines + stock_moves/snapshot",
+            "day: 2025-07-19",
+            "output: one number (product count)",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Hom qua tiem Latte con bao nhieu mat hang trong kho",
+        description=_desc(
+            "measure: count of resale products (seen in purchase_lines) with end-of-day stock 0",
+            "source: purchase_lines + stock_moves/snapshot",
+            "day: 2025-07-19",
+            "output: one number (product count)",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="Dem lo het han trong 14 ngay toi o tiem Latte",
+        description=_desc(
+            "measure: lots still in stock expiring within 14 days",
+            "source: lots minus sale_lots up to as-of; cost uses each lot's unit_cost",
+            "as-of: end of 2025-08-01",
+            "output: count of lots",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Tien von cac lo het han trong 14 ngay toi o tiem Latte",
+        description=_desc(
+            "measure: lots still in stock expiring within 14 days",
+            "source: lots minus sale_lots up to as-of; cost uses each lot's unit_cost",
+            "as-of: end of 2025-08-01",
+            "output: count of lots",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="Lo gan het han nhat cua Amoxicillin 500 o tiem Latte la lo nao",
+        description=_desc(
+            "measure: earliest-expiring lot still in stock and not yet expired",
+            'product: "Amoxicillin 500"',
+            "source: lots minus sale_lots up to as-of",
+            "as-of: end of 2025-08-01",
+            "output: one lot id",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Amoxicillin 500 o tiem Latte con bao nhieu vien trong kho",
+        description=_desc(
+            "measure: earliest-expiring lot still in stock and not yet expired",
+            'product: "Amoxicillin 500"',
+            "source: lots minus sale_lots up to as-of",
+            "as-of: end of 2025-08-01",
+            "output: one lot id",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="Thang 2 tiem Latte thu bao nhieu tu thuoc hoat chat Ibuprofen",
+        description=_desc(
+            "measure: revenue of products with this exact active ingredient",
+            'active_ingredient: "Ibuprofen"',
+            "source: order_lines revenue + drug_info (combined ingredients are separate)",
+            "period: 2025-02-01 .. 2025-02-28 (order date)",
+            "output: one number (VND)",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Thang 2 tiem Latte ty le thuoc ke don la bao nhieu phan tram",
+        description=_desc(
+            "measure: revenue of products with this exact active ingredient",
+            'active_ingredient: "Ibuprofen"',
+            "source: order_lines revenue + drug_info (combined ingredients are separate)",
+            "period: 2025-02-01 .. 2025-02-28 (order date)",
+            "output: one number (VND)",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="Thang 2 tiem Latte ty le doanh thu thuoc ke don bao nhieu",
+        description=_desc(
+            "measure: prescription (Rx) revenue / total revenue x 100",
+            "source: order_lines revenue + drug_info.is_prescription",
+            "period: 2025-02-01 .. 2025-02-28 (order date)",
+            "output: one percent",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Thang 2 tiem Latte lai gop bao nhieu",
+        description=_desc(
+            "measure: prescription (Rx) revenue / total revenue x 100",
+            "source: order_lines revenue + drug_info.is_prescription",
+            "period: 2025-02-01 .. 2025-02-28 (order date)",
+            "output: one percent",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="Lai gop thang Nam cua tiem Latte",
+        description=_desc(
+            "measure: revenue minus qty * cost_per_unit on revenue lines",
+            "source: order_lines (cost_per_unit on the sold unit)",
+            "period: 2025-05-01 .. 2025-05-31 (order date)",
+            "output: one number (VND)",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Lai rong thang Nam cua tiem Latte sau moi khoan chi",
+        description=_desc(
+            "measure: revenue minus qty * cost_per_unit on revenue lines",
+            "source: order_lines (cost_per_unit on the sold unit)",
+            "period: 2025-05-01 .. 2025-05-31 (order date)",
+            "output: one number (VND)",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="Lai rong thang Sau tiem Latte sau moi khoan chi phi",
+        description=_desc(
+            "measure: gross profit minus all expenses dated in the period",
+            "source: order_lines cost_per_unit + expenses table",
+            "period: 2025-06-01 .. 2025-06-30 (order date)",
+            "output: one number (VND)",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Lai gop thang Sau tiem Latte",
+        description=_desc(
+            "measure: gross profit minus all expenses dated in the period",
+            "source: order_lines cost_per_unit + expenses table",
+            "period: 2025-06-01 .. 2025-06-30 (order date)",
+            "output: one number (VND)",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="Tuan nay ai o tiem Latte ban mang ve nhieu tien nhat",
+        description=_desc(
+            "measure: employee with the highest revenue",
+            "source: orders.employee_id + order_lines revenue",
+            "period: 2025-09-01 .. 2025-09-07 (order date)",
+            "output: one employee name",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Tuan nay mon nao o tiem Latte ban mang ve nhieu tien nhat",
+        description=_desc(
+            "measure: employee with the highest revenue",
+            "source: orders.employee_id + order_lines revenue",
+            "period: 2025-09-01 .. 2025-09-07 (order date)",
+            "output: one employee name",
+        ),
+        answer="no",
+    ),
 )
 
 
