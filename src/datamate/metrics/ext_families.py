@@ -153,9 +153,12 @@ def _top_products(engine: MetricEngine, spec: TopProductsQuery, as_of: datetime.
     cov, window = engine._window(spec.period, as_of)
     if cov == "none":
         return Answer.unanswerable("period lies entirely outside the shop's data")
-    if spec.by == "qty_base" and not _ext_recorded(engine, "order_lines", "qty_base"):
+    # Rulebook ranking_measure defines plain "bán chạy" (parsed as qty_base); an explicit
+    # money or profit measure from the parser ("nhiều tiền nhất", "lời nhất") still wins.
+    by = engine.rules.ranking_measure if spec.by == "qty_base" else spec.by
+    if by == "qty_base" and not _ext_recorded(engine, "order_lines", "qty_base"):
         raise Unanswerable("qty_base")
-    if spec.by == "gross_profit":
+    if by == "gross_profit":
         if not _ext_recorded(engine, "order_lines", "cost_per_unit"):
             raise Unanswerable("cost_per_unit")
         if not _ext_recorded(engine, "order_lines", "qty"):
@@ -164,13 +167,13 @@ def _top_products(engine: MetricEngine, spec: TopProductsQuery, as_of: datetime.
     where += f" AND {_non_product_sql(engine)}"
     where, params = _apply_size_filter(engine, spec.size, where, params)
     where, params = _apply_category_filter(engine, spec.category, where, params)
-    if spec.by in {"qty_base", "gross_profit"} and _any_null_qty_base(engine, where, params):
+    if by in {"qty_base", "gross_profit"} and _any_null_qty_base(engine, where, params):
         raise _Abstain()
-    if spec.by == "gross_profit" and _any_null_cost(engine, where, params):
+    if by == "gross_profit" and _any_null_cost(engine, where, params):
         raise _Abstain()
-    if spec.by == "qty_base":
+    if by == "qty_base":
         measure = "SUM(l.qty_base)"
-    elif spec.by == "revenue":
+    elif by == "revenue":
         measure = "COALESCE(SUM(l.line_amount), 0)"
     else:
         measure = "SUM(l.line_amount) - SUM(l.qty * l.cost_per_unit)"

@@ -39,7 +39,7 @@ class RuleConfig(BaseModel):
     exclude_orders_with_return: bool = True
     cancel_rate_denominator: Literal["all_orders"] = "all_orders"
     shifts: dict[str, tuple[datetime.time, datetime.time]] = Field(default_factory=_default_shifts)
-    week_start: Literal["monday"] = "monday"
+    week_start: Literal["monday", "sunday"] = "monday"
     month_this_compare: Literal["same_day_count"] = "same_day_count"
     tet: TetRule = Field(default_factory=TetRule)
     percent_decimals: int = 2

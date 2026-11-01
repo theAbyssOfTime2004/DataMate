@@ -139,9 +139,13 @@ def _month_end(year: int, month: int) -> datetime.date:
 
 
 def _monday(day: datetime.date, rules: RuleConfig) -> datetime.date:
-    if rules.week_start != "monday":
-        raise PeriodError(f"unsupported week_start {rules.week_start}")
-    return day - datetime.timedelta(days=day.weekday())
+    """Return the first day of the week that contains `day` (name is historical)."""
+    if rules.week_start == "monday":
+        return day - datetime.timedelta(days=day.weekday())
+    if rules.week_start == "sunday":
+        # weekday(): Mon=0 … Sun=6 → days since Sunday.
+        return day - datetime.timedelta(days=(day.weekday() + 1) % 7)
+    raise PeriodError(f"unsupported week_start {rules.week_start}")
 
 
 def _clip(start: datetime.date, end: datetime.date, as_of: datetime.date) -> DateRange:

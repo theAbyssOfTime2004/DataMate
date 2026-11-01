@@ -194,13 +194,15 @@ def _stock_qty_base(
     if _ext_recorded(engine, "stock_moves", "balance") or _ext_recorded(
         engine, "stock_moves", "qty_in"
     ):
-        # Prefer last running balance on or before day.
+        # Prefer last running balance on or before day; same-day moves without a time
+        # follow source row order so the pick is deterministic.
         if _ext_recorded(engine, "stock_moves", "balance"):
             row = engine.con.execute(
                 f"""
                 SELECT balance FROM stock_moves
                 WHERE product_key IN ({marks}) AND move_date <= ?
-                ORDER BY move_date DESC, move_ts DESC NULLS LAST
+                ORDER BY move_date DESC, move_ts DESC NULLS LAST,
+                         src_file DESC, src_sheet DESC, src_row DESC
                 LIMIT 1
                 """,
                 params,
@@ -331,7 +333,8 @@ def _all_stock_balances(
                     SELECT product_key, balance,
                            ROW_NUMBER() OVER (
                                PARTITION BY product_key
-                               ORDER BY move_date DESC, move_ts DESC NULLS LAST
+                               ORDER BY move_date DESC, move_ts DESC NULLS LAST,
+                                        src_file DESC, src_sheet DESC, src_row DESC
                            ) AS rn
                     FROM stock_moves
                     WHERE move_date <= ? AND product_key IS NOT NULL

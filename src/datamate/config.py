@@ -70,10 +70,14 @@ class Settings(BaseSettings):
     ext_verify_threshold_split: float = 0.9
     # Verifier prompt with the balanced few-shot set (False = instruction only).
     ext_verify_few_shot: bool = True
+    # When set, pipeline loads this JSON as RuleConfig and skips rulebook.md LLM extract.
+    rules_override_path: Path | None = None
 
-    @field_validator("cache_dir", "runs_dir", mode="after")
+    @field_validator("cache_dir", "runs_dir", "rules_override_path", mode="after")
     @classmethod
-    def _resolve_project_dir(cls, value: Path) -> Path:
+    def _resolve_project_dir(cls, value: Path | None) -> Path | None:
+        if value is None:
+            return None
         if not value.is_absolute():
             return PROJECT_ROOT / value
         return value

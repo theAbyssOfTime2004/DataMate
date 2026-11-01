@@ -12,6 +12,7 @@ from datamate.config import settings
 from datamate.query.ext.prompts import EXT_FEW_SHOT_SETS
 from datamate.query.ext.verify import VERIFY_FEW_SHOTS
 from datamate.query.prompts import FEW_SHOT_SETS
+from datamate.rules import from_rulebook as rulebook_prompts
 
 
 def _normalise(text: str) -> str:
@@ -50,3 +51,13 @@ def test_few_shot_questions_stay_below_the_train_similarity_cutoff() -> None:
         left = _normalise(example.question)
         closest = max(SequenceMatcher(None, left, right).ratio() for right in references)
         assert closest < 0.80, f"{example.question!r} similarity {closest:.3f}"
+
+    # E2 rulebook few-shots (invented English rows; still must not echo train questions).
+    rulebook_bits = [
+        *(f"{name} {text}" for _section, name, text, _knob in rulebook_prompts._CLASSIFY_FEW_SHOTS),
+        *(text for text, _val in rulebook_prompts._EXTRACT_FEW_SHOTS.values()),
+    ]
+    for bit in rulebook_bits:
+        left = _normalise(bit)
+        closest = max(SequenceMatcher(None, left, right).ratio() for right in references)
+        assert closest < 0.80, f"rulebook few-shot {bit!r} similarity {closest:.3f}"

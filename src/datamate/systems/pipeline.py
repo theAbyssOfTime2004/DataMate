@@ -11,7 +11,7 @@ from typing import Any
 
 import duckdb
 
-from datamate.config import PROJECT_ROOT, settings
+from datamate.config import settings
 from datamate.etl import load_or_build_canonical
 from datamate.io.profile import BusinessProfile, profile_business
 from datamate.io.questions import Question
@@ -19,6 +19,7 @@ from datamate.io.raw import BusinessRaw, load_business_cached
 from datamate.llm import LLMUnavailable, get_client
 from datamate.mapping import Mapping, infer_mapping, mapping_fingerprint
 from datamate.metrics import MetricEngine
+from datamate.metrics.engine import RuleUnsupported
 from datamate.metrics.ext_families import product_base_unit
 from datamate.query.context import ShopContext, load_shop_context
 from datamate.query.ext import parse_ext_question
@@ -34,7 +35,8 @@ from datamate.query.spec import (
     TrendQuery,
     ValueQuery,
 )
-from datamate.rules import RuleConfig, load_rules
+from datamate.rules import RuleConfig
+from datamate.rules.from_rulebook import RulebookConfig, load_split_rulebook
 from datamate.scoring.answer import Answer
 from datamate.timeres import LunarCalendar, load_calendar
 
@@ -74,6 +76,9 @@ class _BusinessBundle:
     calendar: LunarCalendar
     warnings: list[str] = field(default_factory=list)
     mapping_failed: bool = False
+    rule_notes: list[Any] = field(default_factory=list)
+    unsupported_knobs: frozenset[str] = field(default_factory=frozenset)
+    rulebook_sha256: str = ""
     # DuckDB connections are not thread-safe; engine calls for one shop take turns.
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -95,6 +100,9 @@ class PipelineSystem:
         # One lock per shop so a slow mapping blocks only that shop's questions.
         self._build_locks: dict[tuple[str, str], threading.Lock] = {}
         self._build_locks_guard = threading.Lock()
+        # RulebookConfig is loaded once per split for the whole run.
+        self._rulebook_by_split: dict[str, RulebookConfig] = {}
+        self._rulebook_lock = threading.Lock()
 
     @property
     def client(self) -> Any:
@@ -134,6 +142,8 @@ class PipelineSystem:
             bundle = self._bundle_for(split, business_id)
             trace["warnings"] = list(bundle.warnings)
             trace["mapping_fingerprint"] = bundle.mapping_fingerprint
+            trace["rulebook_sha256"] = bundle.rulebook_sha256
+            trace["rule_notes_n"] = len(bundle.rule_notes)
             if bundle.mapping_failed or bundle.engine is None or bundle.context is None:
                 trace["abstain_reason"] = "mapping_failed"
                 trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
@@ -162,9 +172,15 @@ class PipelineSystem:
 
             trace["spec"] = parsed.spec.model_dump(mode="json")
             engine_t0 = time.perf_counter()
-            with bundle.lock:
-                details = _engine_details(bundle.engine, parsed.spec, question.as_of_date)
-                answer = bundle.engine.answer(parsed.spec, question.as_of_date)
+            try:
+                with bundle.lock:
+                    details = _engine_details(bundle.engine, parsed.spec, question.as_of_date)
+                    answer = bundle.engine.answer(parsed.spec, question.as_of_date)
+            except RuleUnsupported as exc:
+                trace["abstain_reason"] = f"rule_unsupported:{exc.knob}"
+                trace["timings"]["engine_s"] = round(time.perf_counter() - engine_t0, 6)
+                trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
+                return Answer.abstain(), trace
             trace["timings"]["engine_s"] = round(time.perf_counter() - engine_t0, 6)
             trace["resolved_ranges"] = details["resolved_ranges"]
             trace["coverage"] = details["coverage"]
@@ -283,8 +299,14 @@ class PipelineSystem:
             trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
             return Answer.abstain(), trace
         engine_t0 = time.perf_counter()
-        with bundle.lock:
-            answer = bundle.engine.answer_ext(ext.spec, question.as_of_date)
+        try:
+            with bundle.lock:
+                answer = bundle.engine.answer_ext(ext.spec, question.as_of_date)
+        except RuleUnsupported as exc:
+            trace["abstain_reason"] = f"rule_unsupported:{exc.knob}"
+            trace["timings"]["engine_s"] = round(time.perf_counter() - engine_t0, 6)
+            trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
+            return Answer.abstain(), trace
         trace["timings"]["engine_s"] = round(time.perf_counter() - engine_t0, 6)
         # Logged for ext_threshold.py when the run uses a low threshold.
         trace["ext_answer"] = answer.model_dump(mode="json")
@@ -295,6 +317,19 @@ class PipelineSystem:
             trace["unanswerable_reason"] = answer.reason
         trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
         return answer, trace
+
+    def _rulebook_for(self, split: str) -> RulebookConfig:
+        with self._rulebook_lock:
+            cached = self._rulebook_by_split.get(split)
+            if cached is not None:
+                return cached
+            warnings: list[str] = []
+            cfg = load_split_rulebook(split, self.client, warnings_out=warnings)
+            # Preserve load warnings on the config object for the first bundle.
+            if warnings and not cfg.warnings:
+                cfg.warnings.extend(warnings)
+            self._rulebook_by_split[split] = cfg
+            return cfg
 
     def _bundle_for(self, split: str, business_id: str) -> _BusinessBundle:
         key = (split, business_id)
@@ -311,7 +346,10 @@ class PipelineSystem:
 
         map_t0 = time.perf_counter()
         warnings: list[str] = []
-        rules = _load_rules(split, warnings)
+        rulebook = self._rulebook_for(split)
+        rules = rulebook.rules
+        warnings.extend(rulebook.warnings)
+        unsupported = frozenset(rulebook.unsupported)
         calendar = load_calendar(split)
         raw = load_business_cached(split, business_id)
         profile = profile_business(raw)
@@ -329,6 +367,9 @@ class PipelineSystem:
                 calendar=calendar,
                 warnings=[*warnings, f"mapping_s={mapping_s}"],
                 mapping_failed=True,
+                rule_notes=list(rulebook.notes),
+                unsupported_knobs=unsupported,
+                rulebook_sha256=rulebook.rulebook_sha256,
             )
             self._by_business[key] = bundle
             return bundle
@@ -337,7 +378,14 @@ class PipelineSystem:
         connection = duckdb.connect(str(db_path), read_only=True)
         data_start = report.integrity.min_order_date
         data_end = mapping.data_end_date or report.integrity.max_order_date
-        engine = MetricEngine(connection, rules, calendar, data_start, data_end)
+        engine = MetricEngine(
+            connection,
+            rules,
+            calendar,
+            data_start,
+            data_end,
+            unsupported_knobs=unsupported,
+        )
         context = load_shop_context(connection)
         bundle = _BusinessBundle(
             mapping=mapping,
@@ -349,6 +397,9 @@ class PipelineSystem:
             calendar=calendar,
             warnings=[*warnings, f"mapping_s={mapping_s}"],
             mapping_failed=False,
+            rule_notes=list(rulebook.notes),
+            unsupported_knobs=unsupported,
+            rulebook_sha256=rulebook.rulebook_sha256,
         )
         self._by_business[key] = bundle
         return bundle
@@ -361,15 +412,6 @@ def _split_and_business(workdir: Path) -> tuple[str, str]:
             f"workdir must be <split>/data/<business_id>; got parent={resolved.parent.name!r}"
         )
     return resolved.parent.parent.name, resolved.name
-
-
-def _load_rules(split: str, warnings: list[str]) -> RuleConfig:
-    split_path = PROJECT_ROOT / "rules" / f"{split}.json"
-    if split_path.is_file():
-        return load_rules(split_path)
-    fallback = PROJECT_ROOT / "rules" / "train.json"
-    warnings.append(f"rules/{split}.json missing; fell back to rules/train.json")
-    return load_rules(fallback)
 
 
 def _attempt_dict(attempt: ParseAttempt) -> dict[str, Any]:

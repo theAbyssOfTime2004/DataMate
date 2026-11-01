@@ -59,6 +59,14 @@ class Unanswerable(Exception):
         super().__init__(f"shop does not record {what}")
 
 
+class RuleUnsupported(Exception):
+    """Rulebook asked for a knob value the engine cannot honour; abstain."""
+
+    def __init__(self, knob: str) -> None:
+        self.knob = knob
+        super().__init__(f"rule_unsupported:{knob}")
+
+
 class _DivisionByZero(Exception):
     pass
 
@@ -79,12 +87,14 @@ class MetricEngine:
         cal: LunarCalendar,
         data_start: datetime.date | None,
         data_end: datetime.date | None,
+        unsupported_knobs: frozenset[str] | set[str] | None = None,
     ) -> None:
         self.con = con
         self.rules = rules
         self.cal = cal
         self.data_start = data_start
         self.data_end = data_end
+        self.unsupported_knobs: frozenset[str] = frozenset(unsupported_knobs or ())
         self._present: dict[tuple[str, str], bool] = {}
         self._keys_by_name: dict[str, set[str]] | None = None
 
@@ -97,6 +107,8 @@ class MetricEngine:
         return MetricValue(value=value, range=window, coverage=cov, sql=sql)
 
     def answer(self, spec: QuerySpec, as_of: datetime.date) -> Answer:
+        # RuleUnsupported propagates to the pipeline so abstain_reason is set.
+        self._require_rules_supported(_core_family(spec))
         try:
             if isinstance(spec, ValueQuery):
                 return self._answer_value(spec, as_of)
@@ -122,7 +134,17 @@ class MetricEngine:
         """Compute an extension-parser family (E4a+)."""
         from datamate.metrics.ext_families import answer_ext_family
 
+        family = getattr(spec, "family", None)
+        if isinstance(family, str):
+            self._require_rules_supported(family)
         return answer_ext_family(self, spec, as_of)
+
+    def _require_rules_supported(self, family: str) -> None:
+        from datamate.rules.knobs import first_unsupported_dependency
+
+        knob = first_unsupported_dependency(family, self.unsupported_knobs)
+        if knob is not None:
+            raise RuleUnsupported(knob)
 
     def _answer_value(self, spec: ValueQuery, as_of: datetime.date) -> Answer:
         found = self.compute(spec.query, as_of)
@@ -511,6 +533,19 @@ class MetricEngine:
         if row is None:
             return None
         return row[0]
+
+
+def _core_family(spec: QuerySpec) -> str:
+    """Map a main QuerySpec to the metric/family name used in FAMILY_DEPENDS_ON."""
+    if isinstance(spec, ValueQuery):
+        return spec.query.metric
+    if isinstance(spec, CompareQuery):
+        return spec.a.metric
+    if isinstance(spec, (SeriesQuery, TrendQuery, ArgMaxQuery)):
+        return spec.metric
+    if isinstance(spec, MultiQuery):
+        return spec.queries[0].metric if spec.queries else "revenue"
+    return "revenue"
 
 
 def _fill_zero_days(
