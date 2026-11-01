@@ -85,3 +85,21 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def apply_runtime_paths(*, data_dir: Path, cache_dir: Path) -> str:
+    """Point global settings at an offline split directory for predict / Docker.
+
+    `data_dir` is the split root (questions.jsonl, data/, calendar.csv). Caches go under
+    `cache_dir` (never under data_dir). Returns the split name used by IO helpers so that
+    `settings.split_dir(name) == data_dir.resolve()`.
+    """
+    resolved_data = data_dir.resolve()
+    if not resolved_data.is_dir():
+        raise FileNotFoundError(f"data dir does not exist: {resolved_data}")
+    resolved_cache = cache_dir.resolve()
+    resolved_cache.mkdir(parents=True, exist_ok=True)
+    # Mutable BaseSettings fields; keep IO helpers (split_dir / cache_dir) working as-is.
+    settings.data_root = resolved_data.parent
+    settings.cache_dir = resolved_cache
+    return resolved_data.name

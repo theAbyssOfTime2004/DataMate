@@ -15,6 +15,11 @@ runs/
 /public_test/
 /private_test/
 
+# Large model weights for the offline Docker image (see docker/fetch_model.sh)
+docker/models/**
+!docker/models/.gitkeep
+
+
 # Local IDE / agent tooling (not published)
 .cursor/
 docs/cursor/
