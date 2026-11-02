@@ -475,6 +475,27 @@ def test_derive_qty_base_big_base_unknown() -> None:
     assert fills["order_lines.qty_base"] == 2
 
 
+def test_derive_qty_base_takes_base_unit_from_conversions_without_catalog() -> None:
+    from collections import Counter
+
+    from datamate.etl.build import _derive_qty_base
+
+    # No product catalog: the conversion list is the only place the base unit is named.
+    unit_conv = pd.DataFrame(
+        [{"product_key": "mi", "unit": "thùng", "factor": Decimal(30), "base_unit": "gói"}]
+    )
+    lines = [
+        {"product_key": "mi", "qty": Decimal(2), "unit": "thùng", "qty_base": None},
+        {"product_key": "mi", "qty": Decimal(7), "unit": "gói", "qty_base": None},
+        {"product_key": "mi", "qty": Decimal(1), "unit": "lốc", "qty_base": None},
+    ]
+    fills: Counter[str] = Counter()
+    _derive_qty_base(lines, pd.DataFrame(), unit_conv, fills)
+    assert lines[0]["qty_base"] == Decimal(60)
+    assert lines[1]["qty_base"] == Decimal(7)
+    assert lines[2]["qty_base"] is None  # unit with no factor stays unknown
+
+
 def test_fold_product_name_unique_and_ambiguous() -> None:
     from datamate.etl.build import ProductNameIndex, _line_product_key, _product_key_by_name
 

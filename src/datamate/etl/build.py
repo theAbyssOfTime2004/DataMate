@@ -654,6 +654,11 @@ def _derive_qty_base(
         factor_by[(key, unit_norm)] = (
             factor if isinstance(factor, Decimal) else Decimal(str(factor))
         )
+        # A conversion list names the base unit too; shops without a catalog base unit
+        # need it so lines sold in the base unit count as qty.
+        conv_base = row.get("base_unit")
+        if base_by_key.get(key) is None and isinstance(conv_base, str) and conv_base.strip():
+            base_by_key[key] = conv_base
 
     # Products with no catalog base unit and no conversions: one distinct unit on lines -> qty.
     units_seen: dict[str, set[str]] = defaultdict(set)
