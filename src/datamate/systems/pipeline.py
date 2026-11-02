@@ -160,12 +160,12 @@ class PipelineSystem:
             )
             trace["timings"]["parse_s"] = round(time.perf_counter() - parse_t0, 6)
             trace["parse_attempts"] = [_attempt_dict(item) for item in parsed.attempts]
+            if parsed.period_adjudicated:
+                trace["period_adjudicated"] = True
             if parsed.spec is None:
                 # Extension parser only when every main attempt is out of scope.
                 if parsed.reason == "out_of_scope":
-                    return self._answer_via_ext(
-                        question, bundle, trace, wall_t0, parse_t0
-                    )
+                    return self._answer_via_ext(question, bundle, trace, wall_t0, parse_t0)
                 trace["abstain_reason"] = parsed.reason or "parse_error"
                 trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
                 return Answer.abstain(), trace
@@ -295,8 +295,12 @@ class PipelineSystem:
         trace["ext_verify_p"] = round(p_yes, 4)
         trace["ext_verify_description"] = description
         trace["ext_split_vote"] = ext.split_vote
+        trace["ext_period_adjudicated"] = ext.period_adjudicated
+        # A tie-broken spec gets the same stricter bar as a split vote.
         threshold = (
-            settings.ext_verify_threshold_split if ext.split_vote else settings.ext_verify_threshold
+            settings.ext_verify_threshold_split
+            if ext.split_vote or ext.period_adjudicated
+            else settings.ext_verify_threshold
         )
         if p_yes < threshold:
             trace["abstain_reason"] = "ext_verify_low"
@@ -358,9 +362,7 @@ class PipelineSystem:
             return Answer.abstain(), trace
 
         trace["plan"] = parsed.plan.model_dump(mode="json")
-        description = describe_plan(
-            parsed.plan, question.as_of_date, bundle.rules, bundle.calendar
-        )
+        description = describe_plan(parsed.plan, question.as_of_date, bundle.rules, bundle.calendar)
         verify_t0 = time.perf_counter()
         p_yes = verify_description(question.question, description, self.client)
         trace["timings"]["plan_verify_s"] = round(time.perf_counter() - verify_t0, 6)
@@ -373,9 +375,7 @@ class PipelineSystem:
 
         engine_t0 = time.perf_counter()
         with bundle.lock:
-            answer, compiled, err = try_answer_plan(
-                parsed.plan, bundle.engine, question.as_of_date
-            )
+            answer, compiled, err = try_answer_plan(parsed.plan, bundle.engine, question.as_of_date)
         trace["timings"]["plan_engine_s"] = round(time.perf_counter() - engine_t0, 6)
         if compiled is not None:
             trace["plan_sql"] = compiled.sql

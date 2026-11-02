@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import itertools
 import unicodedata
 
 from pydantic import ValidationError
@@ -164,11 +165,11 @@ def to_query_spec(
         return TrendQuery(metric=metric, filters=filters, periods=periods, direction=direction)
     if granularity is None:
         raise ConvertError("argmax requires granularity")
-    _expect_count(periods, 1, "argmax")
+    period = _contiguous_span(periods, as_of, rules, cal, "argmax")
     return ArgMaxQuery(
         metric=metric,
         filters=filters,
-        period=periods[0],
+        period=period,
         granularity=granularity,
         mode=mode or "max",
     )
@@ -348,6 +349,11 @@ def _period_expr(raw: object, as_of: datetime.date) -> PeriodExpr:
     if kind not in PERIOD_KINDS:
         raise ConvertError(f"unknown period kind {kind!r}")
     raw = _merge_count_alias(str(kind), raw)
+    year = raw.get("year")
+    if isinstance(year, int) and not isinstance(year, bool) and 0 <= year < 100:
+        # "3/25" read as year 25 would resolve outside the data and answer
+        # "unanswerable"; reject so the question abstains instead.
+        raise ConvertError(f"year {year} must be written in full (e.g. 20{year:02d})")
     kind, raw = _settle_redundant_fields(str(kind), raw, as_of)
     allowed = _PERIOD_FIELDS[str(kind)]
     for field, value in raw.items():
@@ -611,6 +617,27 @@ def _reject_unused(
 
 def _has_items(raw: object) -> bool:
     return isinstance(raw, list) and len(raw) > 0
+
+
+def _contiguous_span(
+    periods: list[PeriodExpr],
+    as_of: datetime.date,
+    rules: RuleConfig,
+    cal: LunarCalendar,
+    label: str,
+) -> PeriodExpr:
+    """One period, or back-to-back periods ("months 11/2025, 12/2025 and 1/2026") as the
+    range they cover. Gaps stay an error: the range would add periods nobody asked about."""
+    if len(periods) == 1:
+        return periods[0]
+    windows = [_window(period, as_of, rules, cal) for period in periods]
+    if len(periods) == 0 or any(window is None for window in windows):
+        raise ConvertError(f"{label} requires 1 period(s), got {len(periods)}")
+    spans = sorted(window for window in windows if window is not None)
+    for (_, prev_end), (next_start, _) in itertools.pairwise(spans):
+        if next_start != prev_end + datetime.timedelta(days=1):
+            raise ConvertError(f"{label} requires 1 period(s), got {len(periods)}")
+    return RangeExpr(start=spans[0][0], end=spans[-1][1])
 
 
 def _expect_count(periods: list[PeriodExpr], count: int, label: str) -> None:

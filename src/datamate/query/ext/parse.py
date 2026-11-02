@@ -11,6 +11,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from datamate.config import settings
 from datamate.llm.client import LLMError, LLMUnavailable
+from datamate.query.adjudicate import differ_only_in_ranges, pick_period_reading
 from datamate.query.context import ShopContext
 from datamate.query.convert import ConvertError
 from datamate.query.ext.convert import to_ext_query_spec
@@ -34,6 +35,8 @@ class ExtParseResult:
     # True when one vote said "none" and the others agreed on this spec; the pipeline
     # then asks the verifier for a stricter p_yes (settings.ext_verify_threshold_split).
     split_vote: bool = False
+    # True when the votes differed only in date ranges and the tie-break picked one.
+    period_adjudicated: bool = False
 
 
 def parse_ext_question(
@@ -65,7 +68,7 @@ def parse_ext_question(
                 dropped,
             )
         )
-    return _decide(outcomes, attempts, as_of, rules, cal)
+    return _decide(outcomes, attempts, as_of, rules, cal, question, client)
 
 
 def _fit_messages(
@@ -171,6 +174,8 @@ def _decide(
     as_of: datetime.date,
     rules: RuleConfig,
     cal: LunarCalendar,
+    question: str | None = None,
+    client: Any = None,
 ) -> ExtParseResult:
     if all(status == "out" for status, _spec in outcomes):
         return ExtParseResult(spec=None, reason="out_of_scope", attempts=attempts)
@@ -179,8 +184,20 @@ def _decide(
     specs = [spec for _status, spec in outcomes if spec is not None]
     if not specs:
         return ExtParseResult(spec=None, reason="parse_error", attempts=attempts)
-    keys = {ext_semantic_key(spec, as_of, rules, cal) for spec in specs}
-    if len(keys) != 1:
+    keys = [ext_semantic_key(spec, as_of, rules, cal) for spec in specs]
+    if len(set(keys)) != 1:
+        if (
+            settings.period_adjudicate
+            and question is not None
+            and client is not None
+            and len(specs) == 2
+            and differ_only_in_ranges(keys[0], keys[1])
+        ):
+            choice = pick_period_reading(question, as_of, keys[0], keys[1], client)
+            if choice is not None:
+                return ExtParseResult(
+                    spec=specs[choice], reason=None, attempts=attempts, period_adjudicated=True
+                )
         return ExtParseResult(spec=None, reason="disagreement", attempts=attempts)
     split = any(status == "out" for status, _spec in outcomes)
     return ExtParseResult(spec=specs[0], reason=None, attempts=attempts, split_vote=split)
@@ -194,9 +211,7 @@ def ext_semantic_key(
     return json.dumps(resolved, sort_keys=True, ensure_ascii=False)
 
 
-def _resolve_periods(
-    node: Any, as_of: datetime.date, rules: Any, cal: LunarCalendar
-) -> Any:
+def _resolve_periods(node: Any, as_of: datetime.date, rules: Any, cal: LunarCalendar) -> Any:
     if isinstance(node, dict) and node.get("kind") is not None:
         try:
             window = resolve(_PERIOD_ADAPTER.validate_python(node), as_of, rules, cal)

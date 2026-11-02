@@ -72,6 +72,11 @@ class Settings(BaseSettings):
     ext_verify_few_shot: bool = True
     # When set, pipeline loads this JSON as RuleConfig and skips rulebook.md LLM extract.
     rules_override_path: Path | None = None
+    # Two votes that differ only in date ranges: ask which range the question means and
+    # accept when both A/B orders agree at this probability (else disagreement abstain).
+    # Off: on dev it picked 2 right and 5 wrong, all "bữa qua" (yesterday) misread.
+    period_adjudicate: bool = False
+    period_adjudicate_threshold: float = 0.9
     # E3 composed query plans (after main + ext both out of scope). Off: dev 4/4 but val 0/7
     # answered (the verifier accepts plans that drop conditions like "cancelled" or
     # "delivery batches" in misspelled questions).

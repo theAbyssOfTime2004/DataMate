@@ -9,6 +9,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from datamate.config import settings
 from datamate.llm.client import LLMError, LLMUnavailable
+from datamate.query.adjudicate import differ_only_in_ranges, pick_period_reading
 from datamate.query.context import ShopContext
 from datamate.query.convert import ConvertError, to_query_spec
 from datamate.query.grounding import QuestionText
@@ -36,6 +37,8 @@ class ParseResult:
     spec: QuerySpec | None
     reason: str | None
     attempts: list[ParseAttempt]
+    # True when the votes differed only in date ranges and the tie-break picked one.
+    period_adjudicated: bool = False
 
 
 def parse_question(
@@ -72,7 +75,7 @@ def parse_question(
                 dropped,
             )
         )
-    return _decide(outcomes, attempts, as_of, rules, cal)
+    return _decide(outcomes, attempts, as_of, rules, cal, question, client)
 
 
 def _fit_messages(
@@ -178,6 +181,8 @@ def _decide(
     as_of: datetime.date,
     rules: RuleConfig,
     cal: LunarCalendar,
+    question: str | None = None,
+    client: Any = None,
 ) -> ParseResult:
     if any(status == "out" for status, _spec in outcomes):
         return ParseResult(spec=None, reason="out_of_scope", attempts=attempts)
@@ -186,10 +191,33 @@ def _decide(
     specs = [spec for _status, spec in outcomes if spec is not None]
     if not specs:
         return ParseResult(spec=None, reason="parse_error", attempts=attempts)
-    canonical = {semantic_key(spec, as_of, rules, cal) for spec in specs}
-    if len(canonical) != 1:
-        return ParseResult(spec=None, reason="disagreement", attempts=attempts)
+    keys = [semantic_key(spec, as_of, rules, cal) for spec in specs]
+    if len(set(keys)) != 1:
+        picked = _tie_break(specs, keys, question, as_of, client)
+        if picked is None:
+            return ParseResult(spec=None, reason="disagreement", attempts=attempts)
+        return ParseResult(spec=picked, reason=None, attempts=attempts, period_adjudicated=True)
     return ParseResult(spec=specs[0], reason=None, attempts=attempts)
+
+
+def _tie_break(
+    specs: list[QuerySpec],
+    keys: list[str],
+    question: str | None,
+    as_of: datetime.date,
+    client: Any,
+) -> QuerySpec | None:
+    """Two votes that differ only in date ranges: let the model pick the range."""
+    if (
+        not settings.period_adjudicate
+        or question is None
+        or client is None
+        or len(specs) != 2
+        or not differ_only_in_ranges(keys[0], keys[1])
+    ):
+        return None
+    choice = pick_period_reading(question, as_of, keys[0], keys[1], client)
+    return None if choice is None else specs[choice]
 
 
 def semantic_key(
