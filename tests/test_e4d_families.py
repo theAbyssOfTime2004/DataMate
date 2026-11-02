@@ -146,8 +146,9 @@ def test_purchases_and_avg_cost(tmp_path: Path) -> None:
                 "unit_cost": 5000,
             },
             {
+                # Dated on the receipt header only.
                 "receipt_id": "r2",
-                "receipt_date": datetime.date(2026, 6, 2),
+                "receipt_date": None,
                 "product_key": "sữa",
                 "product_name": "Sữa",
                 "qty": Decimal(5),

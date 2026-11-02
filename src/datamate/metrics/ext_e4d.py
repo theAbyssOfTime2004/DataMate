@@ -175,12 +175,13 @@ def _avg_purchase_cost(
         return Answer.unanswerable("period lies entirely outside the shop's data")
     keys = _require_product_keys(engine, spec.product)
     marks = ", ".join("?" for _ in keys)
+    # Shops often date the receipt header only; a line date, when written, wins.
     sql = f"""
         SELECT COALESCE(SUM(pl.unit_cost * pl.qty), 0),
                COALESCE(SUM(pl.qty), 0)
         FROM purchase_lines pl
         LEFT JOIN purchases p ON p.receipt_id = pl.receipt_id
-        WHERE pl.receipt_date BETWEEN ? AND ?
+        WHERE COALESCE(pl.receipt_date, p.receipt_date) BETWEEN ? AND ?
           AND pl.product_key IN ({marks})
           AND (p.receipt_id IS NULL OR {_purchase_not_cancelled_sql("p")})
           AND pl.unit_cost IS NOT NULL AND pl.qty IS NOT NULL
