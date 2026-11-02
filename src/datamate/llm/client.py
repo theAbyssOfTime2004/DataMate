@@ -6,6 +6,7 @@ import math
 import os
 import re
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,6 +84,11 @@ class LLMClient:
         )
         self.usage_log: list[UsageEntry] = []
         self._token_count_cache: dict[str, int] = {}
+        # Circuit breaker shared by the eval worker threads (see _admit / _record).
+        self._breaker_lock = threading.Lock()
+        self._failures = 0
+        self._down_until = 0.0
+        self._probing = False
 
         headers = {"Content-Type": "application/json"}
         if self._api_key:
@@ -458,20 +464,24 @@ class LLMClient:
         (HTTP 408/429), repeat that same request a single time. `timeout_s` overrides the
         client timeout for this request (long thinking calls)."""
         timeout = timeout_s if timeout_s is not None else self.timeout_s
+        self._admit(error_prefix)
         try:
             resp = self._http.post(url, json=body, timeout=timeout)
         except httpx.TimeoutException:
             pass
         except httpx.HTTPError as exc:
+            self._record(responded=False)
             raise LLMUnavailable(f"{error_prefix}: {exc}") from exc
         else:
             if resp.status_code not in _BUSY_STATUS:
+                self._record(responded=True)
                 return resp, False
             time.sleep(_BUSY_RETRY_DELAY_S)
 
         try:
-            return self._http.post(url, json=body, timeout=timeout), True
+            resp = self._http.post(url, json=body, timeout=timeout)
         except httpx.HTTPError as exc:
+            self._record(responded=False)
             self.usage_log.append(
                 UsageEntry(
                     cache_hit=False,
@@ -482,6 +492,32 @@ class LLMClient:
                 )
             )
             raise LLMUnavailable(f"{error_prefix}: {exc}") from exc
+        self._record(responded=True)
+        return resp, True
+
+    def _admit(self, error_prefix: str) -> None:
+        """Fail at once while the server is marked down. After the cooldown one call goes
+        through as a probe; the others keep failing until it reports back."""
+        with self._breaker_lock:
+            if self._failures < settings.llm_breaker_failures:
+                return
+            if time.monotonic() < self._down_until or self._probing:
+                raise LLMUnavailable(
+                    f"{error_prefix}: server marked down after {self._failures} calls "
+                    "in a row got no response"
+                )
+            self._probing = True
+
+    def _record(self, *, responded: bool) -> None:
+        """Any HTTP response (even an error status) means the server is up."""
+        with self._breaker_lock:
+            self._probing = False
+            if responded:
+                self._failures = 0
+                return
+            self._failures += 1
+            if self._failures >= settings.llm_breaker_failures:
+                self._down_until = time.monotonic() + settings.llm_breaker_cooldown_s
 
     def count_tokens(self, text: str) -> int:
         if text in self._token_count_cache:

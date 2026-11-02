@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     llm_model: str = "qwen3-4b"
     llm_api_key: str = "EMPTY"
     llm_timeout_s: float = 120.0
+    # A server that stops answering: after this many calls in a row get no response, calls
+    # fail at once (LLM unavailable) instead of each waiting out its timeout; one call per
+    # cooldown checks whether the server is back.
+    llm_breaker_failures: int = 3
+    llm_breaker_cooldown_s: float = 60.0
     llm_max_context: int = 8192
     llm_max_output_tokens: int = 1024
     llm_prompt_budget_tokens: int = 6000

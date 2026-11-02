@@ -382,6 +382,74 @@ def test_chat_json_retries_httpx_timeout_once(tmp_path: Path) -> None:
     broken.close()
 
 
+def test_dead_server_fails_fast_then_one_probe_finds_it_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "llm_breaker_failures", 3)
+    monkeypatch.setattr(settings, "llm_breaker_cooldown_s", 3600.0)
+    schema = {"type": "object", "properties": {"x": {"type": "integer"}}, "required": ["x"]}
+    messages = [{"role": "user", "content": "hi"}]
+    hits: list[int] = []
+    server_up = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hits.append(1)
+        if not server_up:
+            raise httpx.ConnectError("connection refused")
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"x": 1}'}}], "usage": {}},
+        )
+
+    client = LLMClient(
+        base_url="http://mock-server:8000/v1",
+        cache_dir=tmp_path,
+        cache_enabled=False,
+        transport=httpx.MockTransport(handler),
+    )
+    for _ in range(3):
+        with pytest.raises(LLMUnavailable):
+            client.chat_json(messages, schema=schema, schema_name="down")
+    assert len(hits) == 3
+    # Marked down: the next calls never reach the server.
+    for _ in range(5):
+        with pytest.raises(LLMUnavailable, match="marked down"):
+            client.chat_json(messages, schema=schema, schema_name="down")
+    assert len(hits) == 3
+
+    # Cooldown over and the server is back: one probe goes through and closes the breaker.
+    monkeypatch.setattr(settings, "llm_breaker_cooldown_s", 0.0)
+    client._down_until = 0.0
+    server_up = True
+    assert client.chat_json(messages, schema=schema, schema_name="up") == {"x": 1}
+    assert client.chat_json(messages, schema=schema, schema_name="up") == {"x": 1}
+    assert len(hits) == 5
+    client.close()
+
+
+def test_error_status_counts_as_server_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "llm_breaker_failures", 2)
+    schema = {"type": "object", "properties": {"x": {"type": "integer"}}, "required": ["x"]}
+    messages = [{"role": "user", "content": "hi"}]
+    hits: list[int] = []
+
+    def overloaded(request: httpx.Request) -> httpx.Response:
+        hits.append(1)
+        return httpx.Response(503, text="busy")
+
+    client = LLMClient(
+        base_url="http://mock-server:8000/v1",
+        cache_dir=tmp_path,
+        cache_enabled=False,
+        transport=httpx.MockTransport(overloaded),
+    )
+    for _ in range(4):
+        with pytest.raises(LLMUnavailable, match="HTTP 503"):
+            client.chat_json(messages, schema=schema, schema_name="busy")
+    assert len(hits) == 4
+    client.close()
+
+
 # Hard-coded BEFORE llm_disable_thinking landed — must stay byte-identical for 4B cache hits.
 _BASELINE_CACHE_KEY = "c4be0e8d6abeeac48a6f2d3f9e8c1a140eba5c8b244ff22f13243cf1b6727df8"
 
