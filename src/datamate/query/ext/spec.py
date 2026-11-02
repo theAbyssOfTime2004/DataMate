@@ -34,9 +34,12 @@ ExtFamily = Literal[
     "nearest_expiry_lot",
     "ingredient_revenue",
     "rx_share",
+    "rx_revenue",
+    "otc_revenue",
     "gross_profit",
     "net_profit",
     "top_employee",
+    "employee_revenue",
     "none",
 ]
 
@@ -277,6 +280,22 @@ class RxShareQuery(BaseModel):
     period: PeriodExpr
 
 
+class RxRevenueQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["rx_revenue"] = "rx_revenue"
+    period: PeriodExpr
+
+
+class OtcRevenueQuery(BaseModel):
+    """Revenue of everything that is not a prescription drug."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["otc_revenue"] = "otc_revenue"
+    period: PeriodExpr
+
+
 class GrossProfitQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -295,6 +314,14 @@ class TopEmployeeQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     family: Literal["top_employee"] = "top_employee"
+    period: PeriodExpr
+
+
+class EmployeeRevenueQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["employee_revenue"] = "employee_revenue"
+    employee: str  # employee code or name as written in the question
     period: PeriodExpr
 
 
@@ -330,9 +357,12 @@ ExtQuerySpec = Annotated[
     | NearestExpiryLotQuery
     | IngredientRevenueQuery
     | RxShareQuery
+    | RxRevenueQuery
+    | OtcRevenueQuery
     | GrossProfitQuery
     | NetProfitQuery
     | TopEmployeeQuery
+    | EmployeeRevenueQuery
     | NoneQuery,
     Field(discriminator="family"),
 ]
@@ -372,7 +402,10 @@ E4D_FAMILIES: tuple[str, ...] = (
     "nearest_expiry_lot",
     "ingredient_revenue",
     "rx_share",
+    "rx_revenue",
+    "otc_revenue",
     "gross_profit",
     "net_profit",
     "top_employee",
+    "employee_revenue",
 )

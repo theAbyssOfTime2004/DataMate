@@ -310,11 +310,14 @@ FAMILY_DEPENDS_ON: dict[str, frozenset[str]] = {
         {"revenue_statuses", "exclude_orders_with_return", "non_product_line_labels"}
     ),
     "rx_share": frozenset({"revenue_statuses", "exclude_orders_with_return"}),
+    "rx_revenue": frozenset({"revenue_statuses", "exclude_orders_with_return"}),
+    "otc_revenue": frozenset({"revenue_statuses", "exclude_orders_with_return"}),
     "gross_profit": frozenset(
         {"revenue_statuses", "exclude_orders_with_return", "non_product_line_labels"}
     ),
     "net_profit": frozenset({"revenue_statuses", "exclude_orders_with_return"}),
     "top_employee": frozenset({"revenue_statuses", "exclude_orders_with_return"}),
+    "employee_revenue": frozenset({"revenue_statuses", "exclude_orders_with_return"}),
 }
 
 

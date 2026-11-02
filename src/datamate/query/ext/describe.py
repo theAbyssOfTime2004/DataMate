@@ -13,6 +13,7 @@ from datamate.query.ext.spec import (
     DebtAgingQuery,
     DebtCollectedQuery,
     DebtTotalQuery,
+    EmployeeRevenueQuery,
     ExtQuerySpec,
     GrossProfitQuery,
     IngredientRevenueQuery,
@@ -21,12 +22,14 @@ from datamate.query.ext.spec import (
     NetProfitQuery,
     NoneQuery,
     OrdersMinAmountQuery,
+    OtcRevenueQuery,
     OutOfStockCountQuery,
     PriceIncreaseEffectQuery,
     PriceOnDateQuery,
     ProductsInMinOrdersQuery,
     PurchaseTotalQuery,
     QtySoldQuery,
+    RxRevenueQuery,
     RxShareQuery,
     StockOnHandQuery,
     StockValueQuery,
@@ -305,6 +308,20 @@ def describe_ext_spec(
             _period_line(spec.period, as_of, rules, cal),
             "output: one percent",
         )
+    if isinstance(spec, RxRevenueQuery):
+        return _lines(
+            "measure: revenue of prescription (Rx) drugs only",
+            "source: order_lines revenue + drug_info.is_prescription",
+            _period_line(spec.period, as_of, rules, cal),
+            "output: one number (VND)",
+        )
+    if isinstance(spec, OtcRevenueQuery):
+        return _lines(
+            "measure: revenue of every item that is not a prescription (Rx) drug",
+            "source: order_lines revenue + drug_info.is_prescription",
+            _period_line(spec.period, as_of, rules, cal),
+            "output: one number (VND)",
+        )
     if isinstance(spec, GrossProfitQuery):
         return _lines(
             "measure: revenue minus qty * cost_per_unit on revenue lines",
@@ -325,6 +342,14 @@ def describe_ext_spec(
             "source: orders.employee_id + order_lines revenue",
             _period_line(spec.period, as_of, rules, cal),
             "output: one employee name",
+        )
+    if isinstance(spec, EmployeeRevenueQuery):
+        return _lines(
+            "measure: revenue of the orders sold by one employee",
+            f'employee: "{spec.employee}" (code or name)',
+            "source: orders.employee_id + order_lines revenue",
+            _period_line(spec.period, as_of, rules, cal),
+            "output: one number (VND)",
         )
     raise TypeError(f"unsupported ext spec {spec!r}")
 

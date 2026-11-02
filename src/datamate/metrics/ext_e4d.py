@@ -10,13 +10,16 @@ from datamate.metrics.format import render_metric, render_percent
 from datamate.parse.text import normalize_label
 from datamate.query.ext.spec import (
     AvgPurchaseCostQuery,
+    EmployeeRevenueQuery,
     GrossProfitQuery,
     IngredientRevenueQuery,
     LotsExpiringQuery,
     NearestExpiryLotQuery,
     NetProfitQuery,
+    OtcRevenueQuery,
     OutOfStockCountQuery,
     PurchaseTotalQuery,
+    RxRevenueQuery,
     RxShareQuery,
     StockOnHandQuery,
     StockValueQuery,
@@ -59,6 +62,10 @@ def answer_e4d(engine: MetricEngine, spec: object, as_of: datetime.date) -> Answ
             return _ingredient_revenue(engine, spec, as_of)
         if isinstance(spec, RxShareQuery):
             return _rx_share(engine, spec, as_of)
+        if isinstance(spec, RxRevenueQuery | OtcRevenueQuery):
+            return _rx_split_revenue(engine, spec, as_of)
+        if isinstance(spec, EmployeeRevenueQuery):
+            return _employee_revenue(engine, spec, as_of)
         if isinstance(spec, GrossProfitQuery):
             return _gross_profit(engine, spec, as_of)
         if isinstance(spec, NetProfitQuery):
@@ -616,6 +623,32 @@ def _rx_share(engine: MetricEngine, spec: RxShareQuery, as_of: datetime.date) ->
     return Answer(type="percent", answer=render_percent(percent, engine.rules))
 
 
+def _rx_split_revenue(
+    engine: MetricEngine, spec: RxRevenueQuery | OtcRevenueQuery, as_of: datetime.date
+) -> Answer:
+    """Revenue of prescription drugs, or of every other line (items absent from
+    drug_info are not prescription drugs)."""
+    from datamate.metrics.engine import Unanswerable
+
+    if not _ext_recorded(engine, "drug_info", "is_prescription"):
+        raise Unanswerable("drug_info.is_prescription")
+    cov, window = engine._window(spec.period, as_of)
+    if cov == "none":
+        return Answer.unanswerable("period lies entirely outside the shop's data")
+    where, params = _revenue_line_where(engine, window)
+    rx = "COALESCE(d.is_prescription, FALSE)"
+    wanted = rx if isinstance(spec, RxRevenueQuery) else f"NOT {rx}"
+    sql = f"""
+        SELECT COALESCE(SUM(l.line_amount), 0)
+        FROM order_lines l
+        JOIN orders o ON o.order_id = l.order_id
+        LEFT JOIN drug_info d ON d.product_key = l.product_key
+        WHERE {where} AND {wanted}
+    """
+    amount = int(engine._scalar(sql, params) or 0)
+    return Answer(type="number", answer=render_metric("revenue", amount, engine.rules))
+
+
 def _gross_profit_amount(
     engine: MetricEngine, window: object
 ) -> int:
@@ -703,3 +736,42 @@ def _top_employee(
     if row is None or row[1] is None:
         raise _Abstain()
     return Answer(type="string", answer=str(row[1]))
+
+
+def _employee_revenue(
+    engine: MetricEngine, spec: EmployeeRevenueQuery, as_of: datetime.date
+) -> Answer:
+    """Revenue of the orders one employee sold. The employee is matched by code or by
+    full name (case, accents and punctuation ignored); no single match -> abstain."""
+    from datamate.metrics.engine import Unanswerable
+
+    if not _ext_recorded(engine, "orders", "employee_id"):
+        raise Unanswerable("orders.employee_id")
+    from datamate.query.grounding import fold
+
+    wanted = fold(spec.employee)
+    staff = engine.con.execute(
+        """
+        SELECT DISTINCT o.employee_id, e.employee_name
+        FROM orders o LEFT JOIN employees e ON e.employee_id = o.employee_id
+        WHERE o.employee_id IS NOT NULL
+        """
+    ).fetchall()
+    matches = {
+        emp_id
+        for emp_id, name in staff
+        if fold(str(emp_id)) == wanted or (name is not None and fold(str(name)) == wanted)
+    }
+    if len(matches) != 1:
+        raise _Abstain()
+    cov, window = engine._window(spec.period, as_of)
+    if cov == "none":
+        return Answer.unanswerable("period lies entirely outside the shop's data")
+    where, params = _revenue_line_where(engine, window)
+    sql = f"""
+        SELECT COALESCE(SUM(l.line_amount), 0)
+        FROM order_lines l JOIN orders o ON o.order_id = l.order_id
+        WHERE {where} AND o.employee_id = ?
+    """
+    amount = int(engine._scalar(sql, [*params, matches.pop()]) or 0)
+    return Answer(type="number", answer=render_metric("revenue", amount, engine.rules))

@@ -606,6 +606,46 @@ VERIFY_FEW_SHOTS: tuple[VerifyExample, ...] = (
         answer="yes",
     ),
     VerifyExample(
+        question="Tiem Latte thang 3 ban thuoc can don bac si thu duoc bao nhieu",
+        description=_desc(
+            "measure: revenue of prescription (Rx) drugs only",
+            "source: order_lines revenue + drug_info.is_prescription",
+            "period: 2025-03-01 .. 2025-03-31 (order date)",
+            "output: one number (VND)",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Tiem Latte thang 3 thuoc can don chiem may phan tram doanh thu",
+        description=_desc(
+            "measure: revenue of prescription (Rx) drugs only",
+            "source: order_lines revenue + drug_info.is_prescription",
+            "period: 2025-03-01 .. 2025-03-31 (order date)",
+            "output: one number (VND)",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="Khong tinh thuoc can don, thang 4 tiem Latte ban duoc bao nhieu tien",
+        description=_desc(
+            "measure: revenue of every item that is not a prescription (Rx) drug",
+            "source: order_lines revenue + drug_info.is_prescription",
+            "period: 2025-04-01 .. 2025-04-30 (order date)",
+            "output: one number (VND)",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Thang 4 tiem Latte ban thuoc can don duoc bao nhieu tien",
+        description=_desc(
+            "measure: revenue of every item that is not a prescription (Rx) drug",
+            "source: order_lines revenue + drug_info.is_prescription",
+            "period: 2025-04-01 .. 2025-04-30 (order date)",
+            "output: one number (VND)",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
         question="Thang 2 tiem Latte lai gop bao nhieu",
         description=_desc(
             "measure: prescription (Rx) revenue / total revenue x 100",
@@ -672,6 +712,28 @@ VERIFY_FEW_SHOTS: tuple[VerifyExample, ...] = (
             "source: orders.employee_id + order_lines revenue",
             "period: 2025-09-01 .. 2025-09-07 (order date)",
             "output: one employee name",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
+        question="Ban hang ma BH07 thang 10 o tiem Latte thu ve bao nhieu",
+        description=_desc(
+            "measure: revenue of the orders sold by one employee",
+            'employee: "BH07" (code or name)',
+            "source: orders.employee_id + order_lines revenue",
+            "period: 2025-10-01 .. 2025-10-31 (order date)",
+            "output: one number (VND)",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Thang 10 o tiem Latte ban hang ma BH07 chot duoc may don",
+        description=_desc(
+            "measure: revenue of the orders sold by one employee",
+            'employee: "BH07" (code or name)',
+            "source: orders.employee_id + order_lines revenue",
+            "period: 2025-10-01 .. 2025-10-31 (order date)",
+            "output: one number (VND)",
         ),
         answer="no",
     ),

@@ -34,8 +34,11 @@ def _default_enabled_families() -> list[str]:
         "stock_value",
         "ingredient_revenue",
         "rx_share",
+        "rx_revenue",
+        "otc_revenue",
         "gross_profit",
         "top_employee",
+        "employee_revenue",
         # Off until dev shows >= 90% (no dev question reached them yet; lot remaining also
         # needs purchase-line lots and returns): out_of_stock_count, lots_expiring,
         # nearest_expiry_lot, net_profit.

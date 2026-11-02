@@ -87,9 +87,13 @@ _SYSTEM = "\n".join(  # noqa: FLY002
         "- nearest_expiry_lot: earliest unexpired lot still in stock for one product.",
         "- ingredient_revenue: revenue of products with exact active_ingredient.",
         "- rx_share: prescription revenue / total revenue (percent).",
+        "- rx_revenue: revenue (VND) of prescription drugs in the period.",
+        "- otc_revenue: revenue (VND) of everything except prescription drugs.",
         "- gross_profit: revenue minus qty*cost_per_unit on revenue lines.",
         "- net_profit: gross profit minus expenses in the month/period.",
         "- top_employee: employee with highest revenue in the period.",
+        "- employee_revenue: revenue of the orders one employee sold in the period.",
+        "  employee = the code or name copied from the question.",
         "- none: shop-wide revenue totals, deliveries, or anything this list cannot",
         "  express.",
         "",
@@ -104,8 +108,8 @@ _SYSTEM = "\n".join(  # noqa: FLY002
         "before_tet. Copy written numbers; never invent calendar dates for relative words.",
         "",
         "Copy product, base_unit, category, and size only from the lists in the user",
-        "message. Leave unused fields null. active_ingredient and unit are free text",
-        "copied from the question when needed.",
+        "message. Leave unused fields null. active_ingredient, unit and employee are free",
+        "text copied from the question when needed.",
         "The worked examples use an invented grocery/cafe, Cửa hàng An Bình.",
     ]
 )
@@ -145,6 +149,7 @@ def _parsed(**overrides: Any) -> dict[str, Any]:
         "buckets": None,
         "unit": None,
         "active_ingredient": None,
+        "employee": None,
     }
     row.update(overrides)
     return row
@@ -473,6 +478,18 @@ EXT_FEW_SHOT_SETS: tuple[tuple[ExtFewShot, ...], ...] = (
             period=_period("month_this"),
         ),
         _ex(
+            "An Binh thang 6/2024 thu ve bao nhieu tu thuoc phai co don",
+            _ASOF,
+            family="rx_revenue",
+            period=_period("month", month=6, year=2024),
+        ),
+        _ex(
+            "Bo phan thuoc ke don ra, thang truoc An Binh con ban duoc bao nhieu",
+            _ASOF,
+            family="otc_revenue",
+            period=_period("month_last"),
+        ),
+        _ex(
             "Lai gop thang 7/2024 cua An Binh la bao nhieu",
             _ASOF,
             family="gross_profit",
@@ -489,6 +506,13 @@ EXT_FEW_SHOT_SETS: tuple[tuple[ExtFewShot, ...], ...] = (
             _ASOF,
             family="top_employee",
             period=_period("week_this"),
+        ),
+        _ex(
+            "Ban hang ma BH07 o An Binh tuan truoc mang ve bao nhieu",
+            _ASOF,
+            family="employee_revenue",
+            employee="BH07",
+            period=_period("week_last"),
         ),
     ),
 )

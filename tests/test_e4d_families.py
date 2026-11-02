@@ -9,6 +9,7 @@ from pathlib import Path
 
 import duckdb
 import pandas as pd
+import pytest
 
 from datamate.etl import (
     CUSTOMERS_COLUMNS,
@@ -34,13 +35,16 @@ from datamate.metrics import MetricEngine
 from datamate.query.ext.describe import describe_ext_spec
 from datamate.query.ext.spec import (
     AvgPurchaseCostQuery,
+    EmployeeRevenueQuery,
     GrossProfitQuery,
     IngredientRevenueQuery,
     LotsExpiringQuery,
     NearestExpiryLotQuery,
     NetProfitQuery,
+    OtcRevenueQuery,
     OutOfStockCountQuery,
     PurchaseTotalQuery,
+    RxRevenueQuery,
     RxShareQuery,
     StockOnHandQuery,
     StockValueQuery,
@@ -419,6 +423,15 @@ def test_drugs_margin_employee(tmp_path: Path) -> None:
     assert net.answer == 70_000
     emp = engine.answer_ext(TopEmployeeQuery(period=june), AS_OF)
     assert emp.answer == "Lan"
+    assert engine.answer_ext(RxRevenueQuery(period=june), AS_OF).answer == 100_000
+    assert engine.answer_ext(OtcRevenueQuery(period=june), AS_OF).answer == 50_000
+    # Matched by code or by name, case and accents ignored.
+    by_code = engine.answer_ext(EmployeeRevenueQuery(employee="e2", period=june), AS_OF)
+    assert by_code.answer == 50_000
+    by_name = engine.answer_ext(EmployeeRevenueQuery(employee="LAN", period=june), AS_OF)
+    assert by_name.answer == 100_000
+    unknown = engine.answer_ext(EmployeeRevenueQuery(employee="Hoa", period=june), AS_OF)
+    assert unknown.type == "abstain"
 
 
 def test_describe_e4d_smoke() -> None:
@@ -438,3 +451,25 @@ def test_describe_e4d_smoke() -> None:
     assert "30 days" in text
     text = describe_ext_spec(RxShareQuery(period=june), AS_OF, rules, cal)
     assert "percent" in text
+
+
+def test_employee_revenue_needs_the_employee_in_the_question() -> None:
+    from datamate.query.convert import ConvertError
+    from datamate.query.ext.convert import to_ext_query_spec
+    from datamate.query.parse_schema import PERIOD_FIELDS
+
+    period: dict[str, object] = {name: None for name in PERIOD_FIELDS}
+    period.update(kind="month", month=6, year=2026)
+    asked = to_ext_query_spec(
+        {"family": "employee_revenue", "employee": "NV02", "period": period},
+        AS_OF,
+        "Thang 6/2026 nhan vien ma NV02 ban duoc bao nhieu tien",
+    )
+    assert isinstance(asked, EmployeeRevenueQuery)
+    assert asked.employee == "NV02"
+    with pytest.raises(ConvertError, match="not grounded"):
+        to_ext_query_spec(
+            {"family": "employee_revenue", "employee": "NV07", "period": period},
+            AS_OF,
+            "Thang 6/2026 nhan vien ma NV02 ban duoc bao nhieu tien",
+        )

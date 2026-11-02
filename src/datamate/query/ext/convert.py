@@ -17,6 +17,7 @@ from datamate.query.ext.spec import (
     DebtAgingQuery,
     DebtCollectedQuery,
     DebtTotalQuery,
+    EmployeeRevenueQuery,
     ExtQuerySpec,
     GrossProfitQuery,
     IngredientRevenueQuery,
@@ -25,12 +26,14 @@ from datamate.query.ext.spec import (
     NetProfitQuery,
     NoneQuery,
     OrdersMinAmountQuery,
+    OtcRevenueQuery,
     OutOfStockCountQuery,
     PriceIncreaseEffectQuery,
     PriceOnDateQuery,
     ProductsInMinOrdersQuery,
     PurchaseTotalQuery,
     QtySoldQuery,
+    RxRevenueQuery,
     RxShareQuery,
     StockOnHandQuery,
     StockValueQuery,
@@ -225,6 +228,12 @@ def to_ext_query_spec(
     if family == "rx_share":
         period = _need_period(parsed.get("period"), as_of, "period")
         return RxShareQuery(period=period)
+    if family == "rx_revenue":
+        period = _need_period(parsed.get("period"), as_of, "period")
+        return RxRevenueQuery(period=period)
+    if family == "otc_revenue":
+        period = _need_period(parsed.get("period"), as_of, "period")
+        return OtcRevenueQuery(period=period)
     if family == "gross_profit":
         period = _need_period(parsed.get("period"), as_of, "period")
         return GrossProfitQuery(period=period)
@@ -234,6 +243,14 @@ def to_ext_query_spec(
     if family == "top_employee":
         period = _need_period(parsed.get("period"), as_of, "period")
         return TopEmployeeQuery(period=period)
+    if family == "employee_revenue":
+        employee = _optional_str(parsed.get("employee"))
+        if employee is None:
+            raise ConvertError("employee_revenue needs employee")
+        if text is not None and not text.mentions_value(employee):
+            raise ConvertError(f"employee {employee!r} is not grounded in the question")
+        period = _need_period(parsed.get("period"), as_of, "period")
+        return EmployeeRevenueQuery(employee=employee, period=period)
     raise ConvertError(f"unknown family {family!r}")
 
 
