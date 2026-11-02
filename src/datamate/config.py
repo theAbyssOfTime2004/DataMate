@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -72,6 +73,13 @@ class Settings(BaseSettings):
     ext_verify_few_shot: bool = True
     # When set, pipeline loads this JSON as RuleConfig and skips rulebook.md LLM extract.
     rules_override_path: Path | None = None
+    # Qwen3 thinking for the parse calls: "off"; "retry" = a second pass with thinking for
+    # questions the fast pass abstained on (disagreement, parse error, out of scope,
+    # verifier low); "always" = thinking for every parse (measurement only).
+    # Retry on: dev 0.876 -> 0.911 (+61/-1), val 0.824 -> 0.857 (+25/-4), holdout +2/-0.
+    parse_thinking: Literal["off", "retry", "always"] = "retry"
+    thinking_max_tokens: int = 3072
+    thinking_timeout_s: float = 300.0
     # Two votes that differ only in date ranges: ask which range the question means and
     # accept when both A/B orders agree at this probability (else disagreement abstain).
     # Off: on dev it picked 2 right and 5 wrong, all "bữa qua" (yesterday) misread.

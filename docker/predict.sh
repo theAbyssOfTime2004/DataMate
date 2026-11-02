@@ -80,11 +80,12 @@ vllm serve "${MODEL_DIR}" \
   --host 127.0.0.1 \
   --port "${VLLM_PORT}" \
   --tensor-parallel-size "${TP_SIZE}" \
-  --max-model-len 8192 \
+  --max-model-len 16384 \
   --gpu-memory-utilization "${GPU_UTIL}" \
   --max-num-seqs "${MAX_SEQS}" \
   --seed 0 \
   --enable-prefix-caching \
+  --reasoning-parser qwen3 \
   >"${OUT_DIR}/vllm.log" 2>&1 &
 VLLM_PID=$!
 

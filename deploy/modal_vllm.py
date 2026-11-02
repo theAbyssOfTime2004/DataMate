@@ -38,7 +38,8 @@ import modal
 MODEL = os.environ.get("DATAMATE_MODEL", "Qwen/Qwen3-4B-Instruct-2507-FP8")
 SERVED_NAME = os.environ.get("DATAMATE_SERVED_NAME", "qwen3-4b")  # must match LLM_MODEL
 APP_NAME = os.environ.get("DATAMATE_APP", "datamate-vllm")
-MAX_MODEL_LEN = os.environ.get("DATAMATE_MAX_LEN", "8192")
+# 16k: a thinking parse (prompt up to ~6k + ~3k reasoning) does not fit in 8k.
+MAX_MODEL_LEN = os.environ.get("DATAMATE_MAX_LEN", "16384")
 VLLM_VERSION = "0.32.0"  # same version as the local docker compose (vllm-openai:v0.32.0)
 GPU = os.environ.get("DATAMATE_GPU", "L40S")
 PORT = 8000
@@ -98,5 +99,8 @@ def serve() -> None:
         "--api-key",
         os.environ["VLLM_API_KEY"],
         "--enable-prefix-caching",
+        # Lets a thinking request reason before the JSON schema constraint starts.
+        "--reasoning-parser",
+        "qwen3",
     ]
     subprocess.Popen(cmd)

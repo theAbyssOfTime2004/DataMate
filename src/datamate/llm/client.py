@@ -79,9 +79,7 @@ class LLMClient:
             max_output_tokens if max_output_tokens is not None else settings.llm_max_output_tokens
         )
         self.disable_thinking = (
-            disable_thinking
-            if disable_thinking is not None
-            else settings.llm_disable_thinking
+            disable_thinking if disable_thinking is not None else settings.llm_disable_thinking
         )
         self.usage_log: list[UsageEntry] = []
         self._token_count_cache: dict[str, int] = {}
@@ -246,9 +244,7 @@ class LLMClient:
                 "required": ["choice"],
                 "additionalProperties": False,
             }
-            fallback_body = {
-                k: v for k, v in body.items() if k != "guided_choice"
-            }
+            fallback_body = {k: v for k, v in body.items() if k != "guided_choice"}
             fallback_body["max_tokens"] = 8
             fallback_body["response_format"] = {
                 "type": "json_schema",
@@ -336,6 +332,7 @@ class LLMClient:
         max_tokens: int | None = None,
         required_keys: list[str] | None = None,
         enable_thinking: bool | None = None,
+        timeout_s: float | None = None,
     ) -> dict[str, Any]:
         resolved_max_tokens = max_tokens if max_tokens is not None else self.max_output_tokens
         # Per-call override (E3 plan compose); None keeps the client default.
@@ -383,6 +380,7 @@ class LLMClient:
             body,
             started=t0,
             error_prefix=f"HTTP transport error calling {url}",
+            timeout_s=timeout_s,
         )
 
         if resp.status_code == 400 and "response_format" in resp.text:
@@ -393,6 +391,7 @@ class LLMClient:
                 fallback_body,
                 started=t0,
                 error_prefix="HTTP transport error on guided_json retry",
+                timeout_s=timeout_s,
             )
             retried = retried or fallback_retried
 
@@ -453,11 +452,14 @@ class LLMClient:
         *,
         started: float,
         error_prefix: str,
+        timeout_s: float | None = None,
     ) -> tuple[httpx.Response, bool]:
         """POST `body` once. On a timeout, or a busy server that dropped the request
-        (HTTP 408/429), repeat that same request a single time."""
+        (HTTP 408/429), repeat that same request a single time. `timeout_s` overrides the
+        client timeout for this request (long thinking calls)."""
+        timeout = timeout_s if timeout_s is not None else self.timeout_s
         try:
-            resp = self._http.post(url, json=body)
+            resp = self._http.post(url, json=body, timeout=timeout)
         except httpx.TimeoutException:
             pass
         except httpx.HTTPError as exc:
@@ -468,7 +470,7 @@ class LLMClient:
             time.sleep(_BUSY_RETRY_DELAY_S)
 
         try:
-            return self._http.post(url, json=body), True
+            return self._http.post(url, json=body, timeout=timeout), True
         except httpx.HTTPError as exc:
             self.usage_log.append(
                 UsageEntry(
@@ -591,7 +593,6 @@ def _strip_think_blocks(content: str) -> str:
     if "<think>" not in content.casefold():
         return content
     return _THINK_BLOCK_RE.sub("", content).lstrip()
-
 
 
 def _parse_llm_json(content: str, finish_reason: str | None) -> Any:

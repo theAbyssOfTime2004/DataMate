@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import threading
 import time
 from collections.abc import Callable
@@ -17,6 +18,7 @@ from datamate.io.profile import BusinessProfile, profile_business
 from datamate.io.questions import Question
 from datamate.io.raw import BusinessRaw, load_business_cached
 from datamate.llm import LLMUnavailable, get_client
+from datamate.llm.thinking import ThinkingClient
 from datamate.mapping import Mapping, infer_mapping, mapping_fingerprint
 from datamate.metrics import MetricEngine
 from datamate.metrics.engine import RuleUnsupported
@@ -41,6 +43,11 @@ from datamate.scoring.answer import Answer
 from datamate.timeres import LunarCalendar, load_calendar
 
 LLM_UNAVAILABLE = "llm_unavailable"
+# Fast-pass abstains that a thinking parse may resolve (reading the question), as opposed
+# to data / engine abstains it cannot change.
+_THINKING_RETRY_REASONS = frozenset(
+    {"disagreement", "parse_error", "out_of_scope", "ext_verify_low"}
+)
 
 MappingProvider = Callable[
     [str, str, BusinessRaw, BusinessProfile, Any],
@@ -149,48 +156,35 @@ class PipelineSystem:
                 trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
                 return Answer.abstain(), trace
 
-            parse_t0 = time.perf_counter()
-            parsed = parse_question(
-                question.question,
-                bundle.context,
-                self.client,
-                bundle.rules,
-                bundle.calendar,
-                question.as_of_date,
-            )
-            trace["timings"]["parse_s"] = round(time.perf_counter() - parse_t0, 6)
-            trace["parse_attempts"] = [_attempt_dict(item) for item in parsed.attempts]
-            if parsed.period_adjudicated:
-                trace["period_adjudicated"] = True
-            if parsed.spec is None:
-                # Extension parser only when every main attempt is out of scope.
-                if parsed.reason == "out_of_scope":
-                    return self._answer_via_ext(question, bundle, trace, wall_t0, parse_t0)
-                trace["abstain_reason"] = parsed.reason or "parse_error"
-                trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
-                return Answer.abstain(), trace
-
-            trace["spec"] = parsed.spec.model_dump(mode="json")
-            engine_t0 = time.perf_counter()
-            try:
-                with bundle.lock:
-                    details = _engine_details(bundle.engine, parsed.spec, question.as_of_date)
-                    answer = bundle.engine.answer(parsed.spec, question.as_of_date)
-            except RuleUnsupported as exc:
-                trace["abstain_reason"] = f"rule_unsupported:{exc.knob}"
-                trace["timings"]["engine_s"] = round(time.perf_counter() - engine_t0, 6)
-                trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
-                return Answer.abstain(), trace
-            trace["timings"]["engine_s"] = round(time.perf_counter() - engine_t0, 6)
-            trace["resolved_ranges"] = details["resolved_ranges"]
-            trace["coverage"] = details["coverage"]
-            trace["sql"] = details["sql"]
-            if answer.type == "abstain":
-                trace["abstain_reason"] = "engine_abstain"
-            elif answer.type == "unanswerable":
-                trace["abstain_reason"] = None
-                trace["unanswerable_reason"] = answer.reason
-            trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
+            base_trace = copy.deepcopy(trace)
+            if settings.parse_thinking == "always":
+                trace["parse_thinking"] = True
+                return self._parse_and_answer(
+                    question, bundle, trace, wall_t0, ThinkingClient(self.client)
+                )
+            answer, trace = self._parse_and_answer(question, bundle, trace, wall_t0, self.client)
+            reason = trace.get("abstain_reason")
+            if (
+                settings.parse_thinking == "retry"
+                and answer.type == "abstain"
+                and reason in _THINKING_RETRY_REASONS
+            ):
+                retry_trace = copy.deepcopy(base_trace)
+                retry_trace["parse_thinking"] = True
+                retry_trace["fast_pass"] = {
+                    "abstain_reason": reason,
+                    "ext_family": trace.get("ext_family"),
+                    "total_s": trace["timings"].get("total_s"),
+                }
+                try:
+                    return self._parse_and_answer(
+                        question, bundle, retry_trace, wall_t0, ThinkingClient(self.client)
+                    )
+                except Exception as exc:  # noqa: BLE001 — keep the fast-pass abstain
+                    # A slow or failed thinking call must not turn into llm_unavailable
+                    # (predict would rerun the whole question).
+                    trace["thinking_error"] = f"{type(exc).__name__}: {exc}"
+                    return answer, trace
             return answer, trace
         except LLMUnavailable as exc:
             # Infrastructure, not the system's judgement. Nothing is cached for the shop,
@@ -204,6 +198,63 @@ class PipelineSystem:
             trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
             return Answer.abstain(), trace
 
+    def _parse_and_answer(
+        self,
+        question: Question,
+        bundle: _BusinessBundle,
+        trace: dict[str, Any],
+        wall_t0: float,
+        parse_client: Any,
+    ) -> tuple[Answer, dict[str, Any]]:
+        """Parse (main, then ext) with `parse_client` and compute. Mapping and verifier
+        calls keep the shared client."""
+        assert bundle.engine is not None and bundle.context is not None
+        parse_t0 = time.perf_counter()
+        parsed = parse_question(
+            question.question,
+            bundle.context,
+            parse_client,
+            bundle.rules,
+            bundle.calendar,
+            question.as_of_date,
+        )
+        trace["timings"]["parse_s"] = round(time.perf_counter() - parse_t0, 6)
+        trace["parse_attempts"] = [_attempt_dict(item) for item in parsed.attempts]
+        if parsed.period_adjudicated:
+            trace["period_adjudicated"] = True
+        if parsed.spec is None:
+            # Extension parser only when every main attempt is out of scope.
+            if parsed.reason == "out_of_scope":
+                return self._answer_via_ext(
+                    question, bundle, trace, wall_t0, parse_t0, parse_client
+                )
+            trace["abstain_reason"] = parsed.reason or "parse_error"
+            trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
+            return Answer.abstain(), trace
+
+        trace["spec"] = parsed.spec.model_dump(mode="json")
+        engine_t0 = time.perf_counter()
+        try:
+            with bundle.lock:
+                details = _engine_details(bundle.engine, parsed.spec, question.as_of_date)
+                answer = bundle.engine.answer(parsed.spec, question.as_of_date)
+        except RuleUnsupported as exc:
+            trace["abstain_reason"] = f"rule_unsupported:{exc.knob}"
+            trace["timings"]["engine_s"] = round(time.perf_counter() - engine_t0, 6)
+            trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
+            return Answer.abstain(), trace
+        trace["timings"]["engine_s"] = round(time.perf_counter() - engine_t0, 6)
+        trace["resolved_ranges"] = details["resolved_ranges"]
+        trace["coverage"] = details["coverage"]
+        trace["sql"] = details["sql"]
+        if answer.type == "abstain":
+            trace["abstain_reason"] = "engine_abstain"
+        elif answer.type == "unanswerable":
+            trace["abstain_reason"] = None
+            trace["unanswerable_reason"] = answer.reason
+        trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
+        return answer, trace
+
     def _answer_via_ext(
         self,
         question: Question,
@@ -211,13 +262,14 @@ class PipelineSystem:
         trace: dict[str, Any],
         wall_t0: float,
         parse_t0: float,
+        parse_client: Any,
     ) -> tuple[Answer, dict[str, Any]]:
         assert bundle.engine is not None and bundle.context is not None
         ext_t0 = time.perf_counter()
         ext = parse_ext_question(
             question.question,
             bundle.context,
-            self.client,
+            parse_client,
             bundle.rules,
             bundle.calendar,
             question.as_of_date,
