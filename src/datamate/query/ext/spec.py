@@ -24,6 +24,7 @@ ExtFamily = Literal[
     "debt_aging",
     "debt_added",
     "debt_collected",
+    "customer_debt_flow",
     "purchase_total",
     "top_supplier",
     "avg_purchase_cost",
@@ -203,6 +204,16 @@ class DebtCollectedQuery(BaseModel):
     period: PeriodExpr
 
 
+class CustomerDebtFlowQuery(BaseModel):
+    """One customer's new debt and later repayments in a period, as [added, paid]."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["customer_debt_flow"] = "customer_debt_flow"
+    customer: str  # customer name or code as written in the question
+    period: PeriodExpr
+
+
 class PurchaseTotalQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -347,6 +358,7 @@ ExtQuerySpec = Annotated[
     | DebtAgingQuery
     | DebtAddedQuery
     | DebtCollectedQuery
+    | CustomerDebtFlowQuery
     | PurchaseTotalQuery
     | TopSupplierQuery
     | AvgPurchaseCostQuery
@@ -389,6 +401,7 @@ E4C_FAMILIES: tuple[str, ...] = (
     "debt_aging",
     "debt_added",
     "debt_collected",
+    "customer_debt_flow",
 )
 
 E4D_FAMILIES: tuple[str, ...] = (

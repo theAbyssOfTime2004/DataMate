@@ -25,6 +25,7 @@ from datamate.metrics import MetricEngine
 from datamate.query.ext.describe import describe_ext_spec
 from datamate.query.ext.spec import (
     AgingBucket,
+    CustomerDebtFlowQuery,
     DebtAddedQuery,
     DebtAgingQuery,
     DebtCollectedQuery,
@@ -323,6 +324,16 @@ def test_debt_added_and_collected(tmp_path: Path) -> None:
     collected = engine.answer_ext(DebtCollectedQuery(period=june), AS_OF)
     # only p2 (70k); p1 is same day; COD payment excluded via order join
     assert collected.answer == 70_000
+
+    # One customer, by name (accents ignored) or code: [added, paid back] in June.
+    an = engine.answer_ext(CustomerDebtFlowQuery(customer="an", period=june), AS_OF)
+    assert an.answer == [60_000, 0]
+    binh = engine.answer_ext(CustomerDebtFlowQuery(customer="Binh", period=june), AS_OF)
+    assert binh.answer == [0, 70_000]
+    by_code = engine.answer_ext(CustomerDebtFlowQuery(customer="C02", period=june), AS_OF)
+    assert by_code.answer == [0, 70_000]
+    unknown = engine.answer_ext(CustomerDebtFlowQuery(customer="Lan", period=june), AS_OF)
+    assert unknown.type == "abstain"
 
 
 def test_debt_unanswerable_without_payable(tmp_path: Path) -> None:

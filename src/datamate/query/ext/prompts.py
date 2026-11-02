@@ -74,6 +74,8 @@ _SYSTEM = "\n".join(  # noqa: FLY002
         "- debt_added: unpaid part on the order day for debt orders placed in period.",
         "- debt_collected: later payments (after order day) dated in the period on debt",
         "  orders. Refunds are not subtracted.",
+        "- customer_debt_flow: for one named customer, debt added and debt paid back in",
+        "  the period as two numbers. customer = the name or code copied from the question.",
         "- purchase_total: sum of purchase receipt totals in period (cancelled excluded).",
         "- top_supplier: supplier with the highest purchase total in period.",
         "- avg_purchase_cost: quantity-weighted average unit cost for one product in a",
@@ -108,8 +110,8 @@ _SYSTEM = "\n".join(  # noqa: FLY002
         "before_tet. Copy written numbers; never invent calendar dates for relative words.",
         "",
         "Copy product, base_unit, category, and size only from the lists in the user",
-        "message. Leave unused fields null. active_ingredient, unit and employee are free",
-        "text copied from the question when needed.",
+        "message. Leave unused fields null. active_ingredient, unit, employee and",
+        "customer are free text copied from the question when needed.",
         "The worked examples use an invented grocery/cafe, Cửa hàng An Bình.",
     ]
 )
@@ -150,6 +152,7 @@ def _parsed(**overrides: Any) -> dict[str, Any]:
         "unit": None,
         "active_ingredient": None,
         "employee": None,
+        "customer": None,
     }
     row.update(overrides)
     return row
@@ -416,6 +419,13 @@ EXT_FEW_SHOT_SETS: tuple[tuple[ExtFewShot, ...], ...] = (
             _ASOF,
             family="debt_collected",
             period=_period("last_n_days", n=7),
+        ),
+        _ex(
+            "Quy 2/2024 chi Ngoc Mai o An Binh mua thieu them bao nhieu, da tra lai bao nhieu",
+            _ASOF,
+            family="customer_debt_flow",
+            customer="Ngoc Mai",
+            period=_period("quarter", q=2, year=2024),
         ),
         _ex(
             "Tinh tong tien cac phieu nhap cua An Binh trong thang Sau nam 2024",

@@ -298,6 +298,9 @@ FAMILY_DEPENDS_ON: dict[str, frozenset[str]] = {
     "debt_aging": frozenset({"debt_exclude_payment_labels", "debt_exclude_channel_labels"}),
     "debt_added": frozenset({"debt_exclude_payment_labels", "debt_exclude_channel_labels"}),
     "debt_collected": frozenset({"debt_exclude_payment_labels", "debt_exclude_channel_labels"}),
+    "customer_debt_flow": frozenset(
+        {"debt_exclude_payment_labels", "debt_exclude_channel_labels"}
+    ),
     "purchase_total": frozenset(),
     "top_supplier": frozenset(),
     "avg_purchase_cost": frozenset(),

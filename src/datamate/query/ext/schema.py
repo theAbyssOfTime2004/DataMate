@@ -28,6 +28,7 @@ EXT_TOP_LEVEL_KEYS: tuple[str, ...] = (
     "unit",
     "active_ingredient",
     "employee",
+    "customer",
 )
 
 _BY_VALUES: tuple[str, ...] = ("qty_base", "revenue", "gross_profit", "order_count")
@@ -107,6 +108,7 @@ def ext_parsed_schema(ctx: ShopContext, products: list[str]) -> dict[str, Any]:
             "unit": {"type": ["string", "null"]},
             "active_ingredient": {"type": ["string", "null"]},
             "employee": {"type": ["string", "null"]},
+            "customer": {"type": ["string", "null"]},
         },
         "required": list(EXT_TOP_LEVEL_KEYS),
         "additionalProperties": False,

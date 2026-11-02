@@ -27,6 +27,7 @@ def _default_enabled_families() -> list[str]:
         "debt_aging",
         "debt_added",
         "debt_collected",
+        "customer_debt_flow",
         "purchase_total",
         "top_supplier",
         "avg_purchase_cost",

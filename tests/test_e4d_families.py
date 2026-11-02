@@ -474,3 +474,24 @@ def test_employee_revenue_needs_the_employee_in_the_question() -> None:
             AS_OF,
             "Thang 6/2026 nhan vien ma NV02 ban duoc bao nhieu tien",
         )
+
+
+def test_ingredient_combination_spellings_agree() -> None:
+    from datamate.metrics.ext_e4d import _ingredient_set
+    from datamate.query.ext.convert import to_ext_query_spec
+    from datamate.query.parse_schema import PERIOD_FIELDS
+
+    period: dict[str, object] = {name: None for name in PERIOD_FIELDS}
+    period.update(kind="month", month=6, year=2026)
+    specs = [
+        to_ext_query_spec(
+            {"family": "ingredient_revenue", "active_ingredient": raw, "period": period},
+            AS_OF,
+            "Thang 6/2026 thuoc hoat chat Paracetamol + Cafein ban duoc bao nhieu",
+        )
+        for raw in ("Paracetamol + Cafein", "paracetamol, cafein", "Paracetamol và Cafein")
+    ]
+    assert {spec.active_ingredient for spec in specs} == {"paracetamol + cafein"}  # type: ignore[attr-defined]
+    # Same combination in another order matches; one part alone does not.
+    assert _ingredient_set("Cafein + Paracetamol") == _ingredient_set("paracetamol + cafein")
+    assert _ingredient_set("Paracetamol") != _ingredient_set("Paracetamol + Cafein")

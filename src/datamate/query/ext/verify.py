@@ -406,6 +406,32 @@ VERIFY_FEW_SHOTS: tuple[VerifyExample, ...] = (
         answer="no",
     ),
     VerifyExample(
+        question="Quy 3/2025 co Kim Oanh o tiem Sen thieu them bao nhieu, tra duoc bao nhieu",
+        description=_desc(
+            "measure: for one customer, [unpaid part on the order day of debt orders placed "
+            "in the period, payments after the order day dated in the period]",
+            'customer: "Kim Oanh" (name or code)',
+            "payments from: payments table",
+            "excluded orders: cancelled; COD/marketplace labels in this shop: none found",
+            "period: 2025-07-01 .. 2025-09-30 (order date)",
+            "output: two numbers (VND), debt added first",
+        ),
+        answer="yes",
+    ),
+    VerifyExample(
+        question="Quy 3/2025 co Kim Oanh o tiem Sen con no tong cong bao nhieu",
+        description=_desc(
+            "measure: for one customer, [unpaid part on the order day of debt orders placed "
+            "in the period, payments after the order day dated in the period]",
+            'customer: "Kim Oanh" (name or code)',
+            "payments from: payments table",
+            "excluded orders: cancelled; COD/marketplace labels in this shop: none found",
+            "period: 2025-07-01 .. 2025-09-30 (order date)",
+            "output: two numbers (VND), debt added first",
+        ),
+        answer="no",
+    ),
+    VerifyExample(
         question="Thang Sau tiem Latte nhap hang tong het bao nhieu tien",
         description=_desc(
             "measure: sum of purchase receipt totals",

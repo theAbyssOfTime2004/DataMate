@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import datetime
 
+from datamate.parse.text import ingredient_parts
 from datamate.query.ext.spec import (
     AgingBucket,
     AvgPurchaseCostQuery,
+    CustomerDebtFlowQuery,
     CustomersMinOrdersQuery,
     DaysMinRevenueQuery,
     DebtAddedQuery,
@@ -217,6 +219,16 @@ def describe_ext_spec(
             _period_line(spec.period, as_of, rules, cal),
             "output: one number (VND)",
         )
+    if isinstance(spec, CustomerDebtFlowQuery):
+        return _lines(
+            "measure: for one customer, [unpaid part on the order day of debt orders placed "
+            "in the period, payments after the order day dated in the period]",
+            f'customer: "{spec.customer}" (name or code)',
+            f"payments from: {pay_src}",
+            f"excluded orders: cancelled; COD/marketplace labels in this shop: {excl}",
+            _period_line(spec.period, as_of, rules, cal),
+            "output: two numbers (VND), debt added first",
+        )
     if isinstance(spec, PurchaseTotalQuery):
         return _lines(
             "measure: money the shop paid suppliers for goods bought in (sum of purchase receipt "
@@ -294,10 +306,16 @@ def describe_ext_spec(
             "output: one lot id",
         )
     if isinstance(spec, IngredientRevenueQuery):
+        if len(ingredient_parts(spec.active_ingredient)) > 1:
+            measure = "measure: revenue of drugs with exactly this combination of ingredients"
+            source = "source: order_lines revenue + drug_info.active_ingredient"
+        else:
+            measure = "measure: revenue of products with this exact active ingredient"
+            source = "source: order_lines revenue + drug_info (combined ingredients are separate)"
         return _lines(
-            "measure: revenue of products with this exact active ingredient",
+            measure,
             f'active_ingredient: "{spec.active_ingredient}"',
-            "source: order_lines revenue + drug_info (combined ingredients are separate)",
+            source,
             _period_line(spec.period, as_of, rules, cal),
             "output: one number (VND)",
         )

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from datamate.metrics.format import render_metric, render_percent
 from datamate.parse.text import normalize_label
 from datamate.query.ext.spec import (
+    CustomerDebtFlowQuery,
     CustomersMinOrdersQuery,
     DaysMinRevenueQuery,
     DebtAddedQuery,
@@ -77,6 +78,8 @@ def answer_ext_family(engine: MetricEngine, spec: ExtQuerySpec, as_of: datetime.
             return _debt_added(engine, spec, as_of)
         if isinstance(spec, DebtCollectedQuery):
             return _debt_collected(engine, spec, as_of)
+        if isinstance(spec, CustomerDebtFlowQuery):
+            return _customer_debt_flow(engine, spec, as_of)
         from datamate.metrics.ext_e4d import answer_e4d
 
         e4d = answer_e4d(engine, spec, as_of)
@@ -1228,6 +1231,14 @@ def _debt_added(
     cov, window = engine._window(spec.period, as_of)
     if cov == "none":
         return Answer.unanswerable("period lies entirely outside the shop's data")
+    total = _debt_added_amount(engine, window)
+    return Answer(type="number", answer=render_metric("revenue", total, engine.rules))
+
+
+def _debt_added_amount(
+    engine: MetricEngine, window: DateRange, order_ids: set[str] | None = None
+) -> int:
+    """Unpaid part on the order day of debt orders placed in the window."""
     excl_sql, excl_params = _debt_not_excluded_sql(engine)
     paid_same_day = _paid_on_order_day_map(engine)
     rows = engine.con.execute(
@@ -1242,10 +1253,12 @@ def _debt_added(
     ).fetchall()
     total = 0
     for oid, payable in rows:
+        if order_ids is not None and str(oid) not in order_ids:
+            continue
         unpaid = int(payable) - paid_same_day.get(str(oid), 0)
         if unpaid > 0:
             total += unpaid
-    return Answer(type="number", answer=render_metric("revenue", total, engine.rules))
+    return total
 
 
 def _debt_collected(
@@ -1255,24 +1268,90 @@ def _debt_collected(
     cov, window = engine._window(spec.period, as_of)
     if cov == "none":
         return Answer.unanswerable("period lies entirely outside the shop's data")
+    total = _debt_collected_amount(engine, window)
+    return Answer(type="number", answer=render_metric("revenue", total, engine.rules))
+
+
+def _debt_collected_amount(
+    engine: MetricEngine, window: DateRange, order_ids: set[str] | None = None
+) -> int:
+    """Payments after the order day, dated in the window, on debt orders."""
     # Without a payments table, amount_paid is on the order day -> nothing "collected" later.
     if not _ext_recorded(engine, "payments", "amount"):
-        return Answer(type="number", answer=0)
+        return 0
     excl_sql, excl_params = _debt_not_excluded_sql(engine)
     rows = engine.con.execute(
         f"""
-        SELECT COALESCE(SUM(p.amount), 0)
+        SELECT p.order_id, COALESCE(SUM(p.amount), 0)
         FROM payments p
         JOIN orders o ON o.order_id = p.order_id
         WHERE p.pay_date BETWEEN ? AND ?
           AND o.order_date IS NOT NULL
           AND p.pay_date > o.order_date
           AND {excl_sql}
+        GROUP BY p.order_id
         """,
         [window.start, window.end, *excl_params],
-    ).fetchone()
-    total = int(rows[0]) if rows and rows[0] is not None else 0
-    return Answer(type="number", answer=render_metric("revenue", total, engine.rules))
+    ).fetchall()
+    return sum(
+        int(amount) for oid, amount in rows if order_ids is None or str(oid) in order_ids
+    )
+
+
+def _customer_debt_flow(
+    engine: MetricEngine, spec: CustomerDebtFlowQuery, as_of: datetime.date
+) -> Answer:
+    _require_debt_inputs(engine)
+    _require_reliable_payable(engine)
+    cov, window = engine._window(spec.period, as_of)
+    if cov == "none":
+        return Answer.unanswerable("period lies entirely outside the shop's data")
+    order_ids = _one_customer_order_ids(engine, spec.customer)
+    added = _debt_added_amount(engine, window, order_ids)
+    paid = _debt_collected_amount(engine, window, order_ids)
+    return Answer(
+        type="list",
+        answer=[
+            render_metric("revenue", added, engine.rules),
+            render_metric("revenue", paid, engine.rules),
+        ],
+    )
+
+
+def _one_customer_order_ids(engine: MetricEngine, customer: str) -> set[str]:
+    """Orders of the one customer whose code or name (case and accents ignored) is
+    `customer`; abstain unless exactly one customer matches."""
+    from datamate.metrics.engine import Unanswerable
+
+    mode = _detect_customer_mode(engine)
+    if mode is None:
+        raise Unanswerable("customer")
+    wanted = fold_text(customer)
+    rows = engine.con.execute(
+        """
+        SELECT o.order_id, o.customer_id, o.customer_name, c.customer_name,
+               COALESCE(o.is_walk_in, FALSE)
+        FROM orders o LEFT JOIN customers c ON c.customer_id = o.customer_id
+        """
+    ).fetchall()
+    by_ref: dict[str, set[str]] = {}
+    for oid, cid, oname, cname, walk in rows:
+        if walk:
+            continue
+        names = [n for n in (oname, cname) if isinstance(n, str)]
+        if mode == "by_code":
+            if cid is None:
+                continue
+            ref = str(cid)
+            hit = fold_text(ref) == wanted or any(fold_text(n) == wanted for n in names)
+        else:
+            ref = _fold_customer_name(oname if isinstance(oname, str) else None) or ""
+            hit = bool(ref) and ref == wanted
+        if hit:
+            by_ref.setdefault(ref, set()).add(str(oid))
+    if len(by_ref) != 1:
+        raise _Abstain()
+    return next(iter(by_ref.values()))
 
 
 def product_base_unit(engine: MetricEngine, product: str) -> str | None:

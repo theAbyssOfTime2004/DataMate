@@ -7,10 +7,12 @@ from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
 
+from datamate.parse.text import ingredient_parts
 from datamate.query.convert import ConvertError, period_from_raw
 from datamate.query.ext.spec import (
     AgingBucket,
     AvgPurchaseCostQuery,
+    CustomerDebtFlowQuery,
     CustomersMinOrdersQuery,
     DaysMinRevenueQuery,
     DebtAddedQuery,
@@ -224,6 +226,10 @@ def to_ext_query_spec(
         if ingredient is None:
             raise ConvertError("ingredient_revenue needs active_ingredient")
         period = _need_period(parsed.get("period"), as_of, "period")
+        # One spelling per combination, so two votes that wrote it differently agree.
+        parts = ingredient_parts(ingredient)
+        if len(parts) > 1:
+            ingredient = " + ".join(parts)
         return IngredientRevenueQuery(active_ingredient=ingredient, period=period)
     if family == "rx_share":
         period = _need_period(parsed.get("period"), as_of, "period")
@@ -243,6 +249,14 @@ def to_ext_query_spec(
     if family == "top_employee":
         period = _need_period(parsed.get("period"), as_of, "period")
         return TopEmployeeQuery(period=period)
+    if family == "customer_debt_flow":
+        customer = _optional_str(parsed.get("customer"))
+        if customer is None:
+            raise ConvertError("customer_debt_flow needs customer")
+        if text is not None and not text.mentions_value(customer):
+            raise ConvertError(f"customer {customer!r} is not grounded in the question")
+        period = _need_period(parsed.get("period"), as_of, "period")
+        return CustomerDebtFlowQuery(customer=customer, period=period)
     if family == "employee_revenue":
         employee = _optional_str(parsed.get("employee"))
         if employee is None:

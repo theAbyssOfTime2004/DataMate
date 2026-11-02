@@ -304,6 +304,7 @@ class PipelineSystem:
             "debt_aging",
             "debt_added",
             "debt_collected",
+            "customer_debt_flow",
         }
         if product or family in {"customers_min_orders", "top_customers"} | _debt_families:
             with bundle.lock:

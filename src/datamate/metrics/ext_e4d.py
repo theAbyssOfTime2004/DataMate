@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from datamate.metrics.format import render_metric, render_percent
-from datamate.parse.text import normalize_label
+from datamate.parse.text import ingredient_parts, normalize_label
 from datamate.query.ext.spec import (
     AvgPurchaseCostQuery,
     EmployeeRevenueQuery,
@@ -563,19 +563,12 @@ def _ingredient_revenue(
     cov, window = engine._window(spec.period, as_of)
     if cov == "none":
         return Answer.unanswerable("period lies entirely outside the shop's data")
-    target = normalize_label(spec.active_ingredient)
-    if target is None:
+    target = _ingredient_set(spec.active_ingredient)
+    if not target:
         raise _Abstain()
     where, params = _revenue_line_where(engine, window)
-    sql = f"""
-        SELECT COALESCE(SUM(l.line_amount), 0)
-        FROM order_lines l
-        JOIN orders o ON o.order_id = l.order_id
-        JOIN drug_info d ON d.product_key = l.product_key
-        WHERE {where}
-          AND d.active_ingredient IS NOT NULL
-    """
-    # Exact match after normalize_label: filter in Python for NFC/casefold consistency.
+    # Exactly the same set of ingredients (a combination drug does not count for one of
+    # its parts); filtered in Python for NFC/casefold/accent consistency.
     rows = engine.con.execute(
         f"""
         SELECT l.line_amount, d.active_ingredient
@@ -589,10 +582,15 @@ def _ingredient_revenue(
     ).fetchall()
     total = 0
     for amount, ingredient in rows:
-        if normalize_label(str(ingredient)) == target:
+        if _ingredient_set(str(ingredient)) == target:
             total += int(amount or 0)
-    del sql
     return Answer(type="number", answer=render_metric("revenue", total, engine.rules))
+
+
+def _ingredient_set(raw: str) -> frozenset[str]:
+    from datamate.query.grounding import fold
+
+    return frozenset(fold(part) for part in ingredient_parts(raw))
 
 
 def _rx_share(engine: MetricEngine, spec: RxShareQuery, as_of: datetime.date) -> Answer:
