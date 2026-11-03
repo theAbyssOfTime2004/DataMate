@@ -38,6 +38,7 @@ from datamate.query.spec import (
     TrendQuery,
     ValueQuery,
 )
+from datamate.query.subjective import subjective_probability
 from datamate.rules import RuleConfig
 from datamate.rules.from_rulebook import RulebookConfig, load_split_rulebook
 from datamate.scoring.answer import Answer
@@ -150,6 +151,12 @@ class PipelineSystem:
             trace["question_rewritten"] = written
             question = question.model_copy(update={"question": written})
         try:
+            if settings.subjective_check:
+                p_subjective = subjective_probability(question.question, self.client)
+                trace["subjective_p"] = round(p_subjective, 4)
+                if p_subjective >= settings.subjective_threshold:
+                    trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
+                    return Answer.unanswerable("asks for an opinion"), trace
             split, business_id = _split_and_business(workdir)
             bundle = self._bundle_for(split, business_id)
             trace["warnings"] = list(bundle.warnings)

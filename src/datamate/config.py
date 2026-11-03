@@ -101,6 +101,11 @@ class Settings(BaseSettings):
     plan_verify_threshold: float = 0.9
     plan_sql_timeout_s: float = 5.0
     plan_enable_thinking: bool = False
+    # Questions asking for an opinion the records cannot hold (taste, attitude, skill,
+    # advice) answer "unanswerable" when the yes/no check reaches this probability.
+    # On all 3000 train questions it fired on 7, all gold unanswerable (0 false positives).
+    subjective_check: bool = True
+    subjective_threshold: float = 0.9
 
     @field_validator("cache_dir", "runs_dir", "rules_override_path", mode="after")
     @classmethod

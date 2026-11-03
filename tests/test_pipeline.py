@@ -216,6 +216,40 @@ def test_pipeline_answers_revenue_end_to_end(synthetic_shop: Path) -> None:
         system.close()
 
 
+class _ChoiceClient(FakeClient):
+    def __init__(self, p_yes: float, scripted: dict[str, list[dict[str, Any]]]) -> None:
+        super().__init__(scripted)
+        self.p_yes = p_yes
+
+    def chat_choice_probs(
+        self, messages: list[dict[str, str]], choices: list[str]
+    ) -> dict[str, float]:
+        del messages, choices
+        return {"yes": self.p_yes, "no": 1 - self.p_yes}
+
+
+@pytest.mark.parametrize(("p_yes", "expected"), [(0.95, "unanswerable"), (0.6, "number")])
+def test_pipeline_opinion_question_is_unanswerable_only_when_sure(
+    synthetic_shop: Path, monkeypatch: pytest.MonkeyPatch, p_yes: float, expected: str
+) -> None:
+    monkeypatch.setattr(settings, "subjective_check", True)
+    parsed = _parsed(periods=[{"kind": "month_this"}])
+    client = _ChoiceClient(p_yes, {**_mapping_scripts(), "ParsedQuestion": [parsed, parsed]})
+    system = PipelineSystem(name="pipeline_test", client=client)
+    try:
+        question = Question(
+            id="q_syn_opinion",
+            business_id="biz_syn",
+            question="mon nao ngon nhat quan",
+            as_of_date=datetime.date(2026, 8, 15),
+        )
+        answer, trace = system.answer(question, business_dir("train", "biz_syn"))
+        assert answer.type == expected
+        assert trace["subjective_p"] == p_yes
+    finally:
+        system.close()
+
+
 def test_pipeline_parse_exception_becomes_abstain(synthetic_shop: Path) -> None:
     client = FakeClient(_mapping_scripts())
     client.raise_on_parse = True
