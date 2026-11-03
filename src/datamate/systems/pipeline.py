@@ -23,6 +23,7 @@ from datamate.mapping import Mapping, infer_mapping, mapping_fingerprint
 from datamate.metrics import MetricEngine
 from datamate.metrics.engine import RuleUnsupported
 from datamate.metrics.ext_families import product_base_unit
+from datamate.parse.text import expand_short_years
 from datamate.query.context import ShopContext, load_shop_context
 from datamate.query.ext import parse_ext_question
 from datamate.query.ext.verify import verify_ext_spec
@@ -144,6 +145,10 @@ class PipelineSystem:
             "sql": [],
         }
         wall_t0 = time.perf_counter()
+        written = expand_short_years(question.question)
+        if written != question.question:
+            trace["question_rewritten"] = written
+            question = question.model_copy(update={"question": written})
         try:
             split, business_id = _split_and_business(workdir)
             bundle = self._bundle_for(split, business_id)

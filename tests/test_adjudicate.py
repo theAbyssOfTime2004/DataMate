@@ -84,10 +84,11 @@ def test_months_with_a_gap_stay_an_error() -> None:
         )
 
 
-def test_two_digit_year_is_rejected() -> None:
-    # "3/25" read as year 25 would resolve outside the data and answer "unanswerable".
-    with pytest.raises(ConvertError):
-        _convert(_parsed(periods=[{"kind": "month", "month": 3, "year": 25}]))
+def test_two_digit_year_is_this_century() -> None:
+    # "th3/25" is March 2025, not year 25.
+    two = _convert(_parsed(periods=[{"kind": "month", "month": 3, "year": 25}]))
+    full = _convert(_parsed(periods=[{"kind": "month", "month": 3, "year": 2025}]))
+    assert two == full
 
 
 def test_differ_only_in_ranges() -> None:

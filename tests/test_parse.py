@@ -199,3 +199,14 @@ def test_normalize_label() -> None:
     assert normalize_label("") is None
     assert normalize_label("   ") is None
     assert normalize_label(None) is None
+
+
+def test_expand_short_years_only_where_a_month_cannot_be() -> None:
+    from datamate.parse.text import expand_short_years
+
+    assert expand_short_years("Th 11/25 dthu") == "Th 11/2025 dthu"
+    assert expand_short_years("so sanh 3/25, 4/25") == "so sanh 3/2025, 4/2025"
+    assert expand_short_years("th3-26") == "th3-2026"
+    # Day/month, full dates, ratios and decimals stay as written.
+    for text in ("ngay 5/12", "tu 15/02/2026", "24/7", "1.2/25x", "22 vien/m2"):
+        assert expand_short_years(text) == text

@@ -351,9 +351,8 @@ def _period_expr(raw: object, as_of: datetime.date) -> PeriodExpr:
     raw = _merge_count_alias(str(kind), raw)
     year = raw.get("year")
     if isinstance(year, int) and not isinstance(year, bool) and 0 <= year < 100:
-        # "3/25" read as year 25 would resolve outside the data and answer
-        # "unanswerable"; reject so the question abstains instead.
-        raise ConvertError(f"year {year} must be written in full (e.g. 20{year:02d})")
+        # Two-digit years ("th3/25", "11-25") are this century.
+        raw = {**raw, "year": 2000 + year}
     kind, raw = _settle_redundant_fields(str(kind), raw, as_of)
     allowed = _PERIOD_FIELDS[str(kind)]
     for field, value in raw.items():
