@@ -12,6 +12,7 @@ from datamate.config import settings
 from datamate.query.ext.prompts import EXT_FEW_SHOT_SETS
 from datamate.query.ext.verify import VERIFY_FEW_SHOTS
 from datamate.query.plan import parse as plan_parse
+from datamate.query.product_match import PRODUCT_MATCH_FEW_SHOTS
 from datamate.query.prompts import FEW_SHOT_SETS
 from datamate.query.subjective import SUBJECTIVE_FEW_SHOTS
 from datamate.rules import from_rulebook as rulebook_prompts
@@ -49,6 +50,7 @@ def test_few_shot_questions_stay_below_the_train_similarity_cutoff() -> None:
         *(ex for group in (*FEW_SHOT_SETS, *EXT_FEW_SHOT_SETS) for ex in group),
         *VERIFY_FEW_SHOTS,
         *SUBJECTIVE_FEW_SHOTS,
+        *PRODUCT_MATCH_FEW_SHOTS,
     ]
     for example in examples:
         left = _normalise(example.question)

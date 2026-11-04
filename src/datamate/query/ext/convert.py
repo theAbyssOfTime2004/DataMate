@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+from collections.abc import Callable
 from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
@@ -63,8 +64,9 @@ def to_ext_query_spec(
     parsed: dict[str, Any],
     as_of: datetime.date,
     question: str | None = None,
+    same_product: Callable[[str], bool] | None = None,
 ) -> ExtQuerySpec:
-    text = QuestionText(question) if question is not None else None
+    text = QuestionText(question, same_product) if question is not None else None
     family = parsed.get("family")
     if family is None or family == "none":
         return NoneQuery()

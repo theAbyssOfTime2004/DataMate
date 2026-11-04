@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,6 +15,7 @@ from datamate.query.context import ShopContext
 from datamate.query.convert import ConvertError, to_query_spec
 from datamate.query.grounding import QuestionText
 from datamate.query.parse_schema import PERIOD_KINDS, TOP_LEVEL_KEYS, parsed_question_schema
+from datamate.query.product_match import product_matcher
 from datamate.query.prompts import FEW_SHOT_SETS, build_messages
 from datamate.query.spec import QuerySpec
 from datamate.rules.model import RuleConfig
@@ -57,6 +59,7 @@ def parse_question(
         return ParseResult(spec=None, reason="out_of_scope", attempts=[])
     products = ctx.product_candidates(question)
     schema = parsed_question_schema(ctx, products)
+    same_product = product_matcher(question, ctx.product_names, client)
     attempts: list[ParseAttempt] = []
     outcomes: list[tuple[str, QuerySpec | None]] = []
     for few_shot_set in range(vote_count):
@@ -73,6 +76,7 @@ def parse_question(
                 cal,
                 attempts,
                 dropped,
+                same_product,
             )
         )
     return _decide(outcomes, attempts, as_of, rules, cal, question, client)
@@ -112,6 +116,7 @@ def _vote(
     cal: LunarCalendar,
     attempts: list[ParseAttempt],
     few_shots_dropped: int,
+    same_product: Callable[[str], bool] | None = None,
 ) -> tuple[str, QuerySpec | None]:
     raw, error = _call(client, messages, schema)
     attempts.append(ParseAttempt(few_shot_set, raw, error, few_shots_dropped))
@@ -120,7 +125,7 @@ def _vote(
     if raw.get("in_scope") is False:
         return "out", None
     try:
-        return "ok", to_query_spec(raw, as_of, rules, cal, question)
+        return "ok", to_query_spec(raw, as_of, rules, cal, question, same_product)
     except ConvertError as exc:
         attempts[-1] = ParseAttempt(few_shot_set, raw, str(exc), few_shots_dropped)
         retried = _retry(messages, raw, str(exc))
@@ -136,7 +141,7 @@ def _vote(
             attempts.append(ParseAttempt(few_shot_set, second, None, few_shots_dropped))
             return "out", None
         try:
-            spec = to_query_spec(second, as_of, rules, cal, question)
+            spec = to_query_spec(second, as_of, rules, cal, question, same_product)
         except ConvertError as retry_exc:
             attempts.append(ParseAttempt(few_shot_set, second, str(retry_exc), few_shots_dropped))
             return "fail", None

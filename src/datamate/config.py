@@ -106,6 +106,11 @@ class Settings(BaseSettings):
     # On all 3000 train questions it fired on 7, all gold unanswerable (0 false positives).
     subjective_check: bool = True
     subjective_threshold: float = 0.9
+    # A picked product that shares only some words with the question is accepted when a
+    # yes/no check says the other words are synonyms (lợn / heo, rán / chiên). On 37
+    # train questions rewritten with regional words: 4 -> 32 right, 0 wrong.
+    product_synonym_check: bool = True
+    product_synonym_threshold: float = 0.9
 
     @field_validator("cache_dir", "runs_dir", "rules_override_path", mode="after")
     @classmethod

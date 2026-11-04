@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,6 +20,7 @@ from datamate.query.ext.prompts import EXT_FEW_SHOT_SETS, build_ext_messages
 from datamate.query.ext.schema import EXT_TOP_LEVEL_KEYS, ext_parsed_schema
 from datamate.query.ext.spec import ExtQuerySpec, NoneQuery
 from datamate.query.parse import ParseAttempt
+from datamate.query.product_match import product_matcher
 from datamate.rules.model import RuleConfig
 from datamate.timeres.calendar import CalendarError, LunarCalendar
 from datamate.timeres.periods import PeriodError, PeriodExpr, resolve
@@ -52,6 +54,7 @@ def parse_ext_question(
     vote_count = settings.parse_votes if votes is None else votes
     products = ctx.product_candidates(question)
     schema = ext_parsed_schema(ctx, products)
+    same_product = product_matcher(question, ctx.product_names, client)
     attempts: list[ParseAttempt] = []
     outcomes: list[tuple[str, ExtQuerySpec | None]] = []
     for few_shot_set in range(vote_count):
@@ -66,6 +69,7 @@ def parse_ext_question(
                 as_of,
                 attempts,
                 dropped,
+                same_product,
             )
         )
     return _decide(outcomes, attempts, as_of, rules, cal, question, client)
@@ -103,13 +107,14 @@ def _vote(
     as_of: datetime.date,
     attempts: list[ParseAttempt],
     few_shots_dropped: int,
+    same_product: Callable[[str], bool] | None = None,
 ) -> tuple[str, ExtQuerySpec | None]:
     raw, error = _call(client, messages, schema)
     attempts.append(ParseAttempt(few_shot_set, raw, error, few_shots_dropped))
     if error is not None or raw is None:
         return "fail", None
     try:
-        spec = to_ext_query_spec(raw, as_of, question)
+        spec = to_ext_query_spec(raw, as_of, question, same_product)
     except ConvertError as exc:
         attempts[-1] = ParseAttempt(few_shot_set, raw, str(exc), few_shots_dropped)
         retried = _retry(messages, raw, str(exc))
@@ -122,7 +127,7 @@ def _vote(
             )
             return "fail", None
         try:
-            spec = to_ext_query_spec(second, as_of, question)
+            spec = to_ext_query_spec(second, as_of, question, same_product)
         except ConvertError as retry_exc:
             attempts.append(ParseAttempt(few_shot_set, second, str(retry_exc), few_shots_dropped))
             return "fail", None

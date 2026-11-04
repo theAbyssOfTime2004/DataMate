@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Callable
 
 _TOKEN = re.compile(r"[a-z0-9]+")
 
@@ -79,8 +80,12 @@ def _same_word(written: str, wanted: str) -> bool:
 
 
 class QuestionText:
-    def __init__(self, question: str) -> None:
+    def __init__(
+        self, question: str, same_product: Callable[[str], bool] | None = None
+    ) -> None:
         self.raw = question
+        # Asked about a product that shares some but not all words with the question.
+        self._same_product = same_product
         self.folded = fold(question)
         self.words = self.folded.split()
         self.tokens = frozenset(self.words)
@@ -122,7 +127,9 @@ class QuestionText:
 
     def mentions_product(self, name: str) -> bool:
         hits, total = self.product_word_hits(name)
-        return total > 0 and hits == total
+        if total > 0 and hits == total:
+            return True
+        return hits > 0 and self._same_product is not None and self._same_product(name)
 
     def _has_marked_word(self, wanted: str) -> bool:
         bare = fold(wanted)

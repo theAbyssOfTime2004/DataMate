@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import itertools
 import unicodedata
+from collections.abc import Callable
 
 from pydantic import ValidationError
 
@@ -95,9 +96,10 @@ def to_query_spec(
     rules: RuleConfig,
     cal: LunarCalendar,
     question: str | None = None,
+    same_product: Callable[[str], bool] | None = None,
 ) -> QuerySpec:
     """With the question text, filter values and year wording must be grounded in it."""
-    text = QuestionText(question) if question is not None else None
+    text = QuestionText(question, same_product) if question is not None else None
     kind = _choice(parsed.get("kind"), QUESTION_KINDS, "kind")
     metric = _choice(parsed.get("metric"), METRICS, "metric")
     compare_kind = _optional_choice(parsed.get("compare_kind"), COMPARE_KINDS, "compare_kind")
