@@ -111,6 +111,13 @@ class Settings(BaseSettings):
     # train questions rewritten with regional words: 4 -> 32 right, 0 wrong.
     product_synonym_check: bool = True
     product_synonym_threshold: float = 0.9
+    # A question that asks about a ranking term the rulebook defines ("Khách trung thành
+    # nhất") is answered by the rank block from that definition, and never as an opinion.
+    # 176 train questions rewritten with invented terms: 168 right, 0 wrong; real
+    # dev/val/holdout answers unchanged.
+    defined_term_check: bool = True
+    defined_term_threshold: float = 0.9
+    rank_verify_threshold: float = 0.9
 
     @field_validator("cache_dir", "runs_dir", "rules_override_path", mode="after")
     @classmethod

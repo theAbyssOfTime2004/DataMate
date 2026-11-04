@@ -23,11 +23,14 @@ from datamate.mapping import Mapping, infer_mapping, mapping_fingerprint
 from datamate.metrics import MetricEngine
 from datamate.metrics.engine import RuleUnsupported
 from datamate.metrics.ext_families import product_base_unit
+from datamate.metrics.rank import answer_rank
 from datamate.parse.text import expand_short_years
 from datamate.query.context import ShopContext, load_shop_context
+from datamate.query.defined_terms import match_defined_term, ranking_rows
 from datamate.query.ext import parse_ext_question
-from datamate.query.ext.verify import verify_ext_spec
+from datamate.query.ext.verify import verify_description, verify_ext_spec
 from datamate.query.parse import ParseAttempt, parse_question
+from datamate.query.rank import describe_rank, parse_rank_question
 from datamate.query.spec import (
     ArgMaxQuery,
     CompareQuery,
@@ -41,6 +44,7 @@ from datamate.query.spec import (
 from datamate.query.subjective import subjective_probability
 from datamate.rules import RuleConfig
 from datamate.rules.from_rulebook import RulebookConfig, load_split_rulebook
+from datamate.rules.parse_rulebook import RuleRow
 from datamate.scoring.answer import Answer
 from datamate.timeres import LunarCalendar, load_calendar
 
@@ -112,6 +116,9 @@ class PipelineSystem:
         # RulebookConfig is loaded once per split for the whole run.
         self._rulebook_by_split: dict[str, RulebookConfig] = {}
         self._rulebook_lock = threading.Lock()
+        # Rulebook rows that define a ranking term, found once per split.
+        self._ranking_rows_by_split: dict[str, list[RuleRow]] = {}
+        self._ranking_rows_lock = threading.Lock()
 
     @property
     def client(self) -> Any:
@@ -151,13 +158,15 @@ class PipelineSystem:
             trace["question_rewritten"] = written
             question = question.model_copy(update={"question": written})
         try:
-            if settings.subjective_check:
+            split, business_id = _split_and_business(workdir)
+            term = self._defined_term(split, question.question, trace)
+            # A term the rulebook defines as a count is not an opinion ("trung thành nhất").
+            if settings.subjective_check and term is None:
                 p_subjective = subjective_probability(question.question, self.client)
                 trace["subjective_p"] = round(p_subjective, 4)
                 if p_subjective >= settings.subjective_threshold:
                     trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
                     return Answer.unanswerable("asks for an opinion"), trace
-            split, business_id = _split_and_business(workdir)
             bundle = self._bundle_for(split, business_id)
             trace["warnings"] = list(bundle.warnings)
             trace["mapping_fingerprint"] = bundle.mapping_fingerprint
@@ -168,6 +177,10 @@ class PipelineSystem:
                 trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
                 return Answer.abstain(), trace
 
+            if term is not None:
+                ranked = self._answer_via_rank(question, term, bundle, trace, wall_t0)
+                if ranked is not None:
+                    return ranked
             base_trace = copy.deepcopy(trace)
             if settings.parse_thinking == "always":
                 trace["parse_thinking"] = True
@@ -400,7 +413,6 @@ class PipelineSystem:
     ) -> tuple[Answer, dict[str, Any]]:
         """E3: compose a QueryPlan when main + ext are both out of scope."""
         assert bundle.engine is not None and bundle.context is not None
-        from datamate.query.ext.verify import verify_description
         from datamate.query.plan.describe import describe_plan
         from datamate.query.plan.execute import try_answer_plan
         from datamate.query.plan.parse import parse_plan_question
@@ -458,6 +470,81 @@ class PipelineSystem:
             trace["abstain_reason"] = None
         trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
         return answer, trace
+
+    def _defined_term(self, split: str, question: str, trace: dict[str, Any]) -> RuleRow | None:
+        """The rulebook ranking term the question asks about, if any."""
+        if not settings.defined_term_check:
+            return None
+        # One classification per split; other questions wait instead of repeating it.
+        with self._ranking_rows_lock:
+            rows = self._ranking_rows_by_split.get(split)
+            if rows is None:
+                rows = ranking_rows(list(self._rulebook_for(split).notes), self.client)
+                self._ranking_rows_by_split[split] = rows
+        term, asked = match_defined_term(question, rows, self.client)
+        if asked:
+            trace["defined_term_asked"] = asked
+        if term is not None:
+            trace["defined_term"] = term.name
+        return term
+
+    def _answer_via_rank(
+        self,
+        question: Question,
+        term: RuleRow,
+        bundle: _BusinessBundle,
+        trace: dict[str, Any],
+        wall_t0: float,
+    ) -> tuple[Answer, dict[str, Any]] | None:
+        """Rank block for a rulebook term; None when the term does not fit it."""
+        assert bundle.engine is not None and bundle.context is not None
+        rank_t0 = time.perf_counter()
+        parsed = parse_rank_question(
+            question.question,
+            term,
+            bundle.context,
+            self.client,
+            bundle.rules,
+            bundle.calendar,
+            question.as_of_date,
+        )
+        trace["timings"]["rank_parse_s"] = round(time.perf_counter() - rank_t0, 6)
+        trace["rank_parse_raw"] = parsed.raw
+        if parsed.reason == "rank_none":
+            return None
+        trace["ext_family"] = "rank"
+
+        def done(answer: Answer, reason: str | None) -> tuple[Answer, dict[str, Any]]:
+            trace["abstain_reason"] = reason
+            if answer.type == "unanswerable":
+                trace["unanswerable_reason"] = answer.reason
+            trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
+            return answer, trace
+
+        if parsed.spec is None:
+            trace["rank_parse_errors"] = parsed.errors
+            return done(Answer.abstain(), parsed.reason)
+        trace["spec"] = parsed.spec.model_dump(mode="json")
+        customer_who = None
+        if parsed.spec.entity == "customer":
+            from datamate.metrics.ext_families import customer_who_phrase
+
+            with bundle.lock:
+                customer_who = customer_who_phrase(bundle.engine)
+        description = describe_rank(
+            parsed.spec, question.as_of_date, bundle.rules, bundle.calendar, customer_who
+        )
+        asked = f"{question.question}\n(Rulebook: {term.name} = {term.text})"
+        p_yes = verify_description(asked, description, self.client)
+        trace["rank_verify_p"] = round(p_yes, 4)
+        trace["rank_verify_description"] = description
+        if p_yes < settings.rank_verify_threshold:
+            return done(Answer.abstain(), "rank_verify_low")
+        engine_t0 = time.perf_counter()
+        with bundle.lock:
+            answer = answer_rank(bundle.engine, parsed.spec, question.as_of_date)
+        trace["timings"]["engine_s"] = round(time.perf_counter() - engine_t0, 6)
+        return done(answer, "engine_abstain" if answer.type == "abstain" else None)
 
     def _rulebook_for(self, split: str) -> RulebookConfig:
         with self._rulebook_lock:

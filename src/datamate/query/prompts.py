@@ -23,7 +23,29 @@ EXAMPLE_CONTEXT = ShopContext(
     data_end=datetime.date(2024, 12, 31),
 )
 
-_SYSTEM = "\n".join(  # noqa: FLY002
+# How each period kind reads in Vietnamese; shared with the rank parser.
+PERIOD_KIND_LINES: tuple[str, ...] = (
+    "Period kinds. Copy numbers that are written in the question. For relative wording,",
+    "use the kind or year_rel. Never turn 'tháng này', 'tuần rồi', 'năm ngoái', or",
+    "'Tết năm nay' into calendar dates.",
+    "- day: an explicit calendar date. Example: ngày 3/3/2024 -> date 2024-03-03.",
+    "- today: hôm nay.",
+    "- yesterday: hôm qua.",
+    "- last_n_days: 7 ngày gần nhất -> n=7, including today.",
+    "- week_this: tuần này, Monday through today.",
+    "- week_last: tuần rồi / tuần trước, the previous Monday-Sunday week.",
+    "- month: tháng 5/2025 -> month=5, year=2025. tháng 5 with no year -> year null.",
+    "- month_this: tháng này, day 1 through today.",
+    "- month_last: the whole previous calendar month, not the same-day-count comparison.",
+    "- quarter: quý 3 with no year -> q=3, year null. quý 3/2024 -> q=3, year=2024.",
+    "- year: năm 2024 -> year=2024. năm ngoái -> year_rel=-1. năm nay -> year_rel=0.",
+    "- ytd: từ đầu năm đến hôm nay.",
+    "- range: both endpoints are written as calendar dates.",
+    "- tet: Tết năm nay -> year_rel=0. Tết năm ngoái -> year_rel=-1. Tết 2024 -> year=2024.",
+    "- before_tet: 17 ngày trước Tết năm nay -> n_days=17, year_rel=0.",
+)
+
+_SYSTEM = "\n".join(
     [
         "You translate one Vietnamese shop question into a flat JSON object.",
         "You do not calculate the answer and you do not calculate dates.",
@@ -47,24 +69,7 @@ _SYSTEM = "\n".join(  # noqa: FLY002
         "- trend: whether the metric is increasing or decreasing across the periods.",
         "- argmax: the day or month with the max or min value. Ties go to the earliest date.",
         "",
-        "Period kinds. Copy numbers that are written in the question. For relative wording,",
-        "use the kind or year_rel. Never turn 'tháng này', 'tuần rồi', 'năm ngoái', or",
-        "'Tết năm nay' into calendar dates.",
-        "- day: an explicit calendar date. Example: ngày 3/3/2024 -> date 2024-03-03.",
-        "- today: hôm nay.",
-        "- yesterday: hôm qua.",
-        "- last_n_days: 7 ngày gần nhất -> n=7, including today.",
-        "- week_this: tuần này, Monday through today.",
-        "- week_last: tuần rồi / tuần trước, the previous Monday-Sunday week.",
-        "- month: tháng 5/2025 -> month=5, year=2025. tháng 5 with no year -> year null.",
-        "- month_this: tháng này, day 1 through today.",
-        "- month_last: the whole previous calendar month, not the same-day-count comparison.",
-        "- quarter: quý 3 with no year -> q=3, year null. quý 3/2024 -> q=3, year=2024.",
-        "- year: năm 2024 -> year=2024. năm ngoái -> year_rel=-1. năm nay -> year_rel=0.",
-        "- ytd: từ đầu năm đến hôm nay.",
-        "- range: both endpoints are written as calendar dates.",
-        "- tet: Tết năm nay -> year_rel=0. Tết năm ngoái -> year_rel=-1. Tết 2024 -> year=2024.",
-        "- before_tet: 17 ngày trước Tết năm nay -> n_days=17, year_rel=0.",
+        *PERIOD_KIND_LINES,
         "",
         "compare_kind:",
         "- explicit: the question names both periods. Asked period first, baseline second.",
