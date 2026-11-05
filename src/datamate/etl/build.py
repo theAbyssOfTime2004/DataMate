@@ -1352,6 +1352,15 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
         walk_in_norm_set=walk_in_for_simple,
     )
 
+    if "employees" in simple_tables:
+        from datamate.etl.staff import resolve_staff
+
+        orders_df, simple_tables["employees"], tied = resolve_staff(
+            orders_df, simple_tables["employees"]
+        )
+        if tied:
+            notes.append(f"{tied} staff names on orders tied to the staff list")
+
     final_parse_stats = tracker.finalize()
 
     rows_per_table = {

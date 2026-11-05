@@ -136,6 +136,73 @@ def ranking_rows(rows: list[RuleRow], client: Any) -> list[RuleRow]:
     return kept
 
 
+_UNIT_SYSTEM = "\n".join(  # noqa: FLY002
+    [
+        "You read one row of a Vietnamese shop rulebook: a term and its definition.",
+        "Answer yes only when the row says what one record of the shop's book is called",
+        "and how to count those records (a visit, a ticket, a job card, a trip), so that a",
+        "question can ask how many of them there were.",
+        "Answer no for rows about money, dates, statuses, units of goods, rankings, file",
+        "layout or answer format.",
+        "Reply with one word: yes or no.",
+    ]
+)
+
+# Invented rows (no rulebook text); yes and no alternate.
+UNIT_ROW_FEW_SHOTS: tuple[RankingRowExample, ...] = (
+    RankingRowExample(
+        "Ca, suất", "mỗi dòng sổ là một suất khách ngồi, gồm cả suất được mời", "yes"
+    ),
+    RankingRowExample("Tiền cọc", "khoản khách đặt trước, không tính vào doanh thu", "no"),
+    RankingRowExample(
+        "Chuyến, cuốc", "mỗi dòng nhật ký là một cuốc chở, kể cả cuốc chở lại", "yes"
+    ),
+    RankingRowExample("Món bán chạy", "món có số phần bán ra cao nhất trong kỳ", "no"),
+)
+
+
+def unit_rows(rows: list[RuleRow], client: Any) -> list[RuleRow]:
+    """Rule rows that name the shop's counted record (lượt, phiếu); asked once per row."""
+    if not settings.unit_terms or client is None:
+        return []
+    kept: list[RuleRow] = []
+    for row in rows:
+        messages: list[dict[str, str]] = [{"role": "system", "content": _UNIT_SYSTEM}]
+        for example in UNIT_ROW_FEW_SHOTS:
+            content = _row_content(example.term, example.definition)
+            messages.append({"role": "user", "content": content})
+            messages.append({"role": "assistant", "content": example.answer})
+        content = _row_content(row.name, row.text).replace("define a ranking", "name a record")
+        messages.append({"role": "user", "content": content})
+        probs = client.chat_choice_probs(messages, list(_CHOICES))
+        if float(probs.get("yes", 0.0)) >= 0.5:
+            kept.append(row)
+    return kept
+
+
+def match_unit_term(
+    question: str, rows: list[RuleRow], client: Any
+) -> tuple[RuleRow | None, list[tuple[str, float]]]:
+    """The record-naming row the question counts ("bao nhiêu lượt xe"), or None."""
+    asked = fold(question)
+    padded = f" {asked} "
+    candidates = [
+        row
+        for row in rows
+        if any(
+            f" {name} " in padded for name in (fold(part) for part in row.name.split(",")) if name
+        )
+    ][:_MAX_CANDIDATES]
+    checked: list[tuple[str, float]] = []
+    best: tuple[float, RuleRow] | None = None
+    for row in candidates:
+        p_yes = term_probability(question, row, client)
+        checked.append((row.name, round(p_yes, 4)))
+        if p_yes >= settings.defined_term_threshold and (best is None or p_yes > best[0]):
+            best = (p_yes, row)
+    return (best[1] if best is not None else None), checked
+
+
 def term_candidates(question: str, rows: list[RuleRow]) -> list[RuleRow]:
     """Rule rows whose name shares rare word pairs with the question, closest first."""
     asked = _pairs(fold(question))

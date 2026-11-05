@@ -128,6 +128,10 @@ class Settings(BaseSettings):
     # the extension prompt stays unchanged. Same-GPU check on the 117 ext questions of
     # the delivery shops: dev +6, val +3, no new wrongs.
     event_path: bool = True
+    # A question the pipeline abstained on that counts the shop's record unit as the
+    # rulebook names it ("lượt xe", "phiếu") is answered by the unit block. On the 124
+    # train abstains: 1 answered (right), no new wrongs.
+    unit_terms: bool = True
     defined_term_threshold: float = 0.9
     rank_verify_threshold: float = 0.9
 

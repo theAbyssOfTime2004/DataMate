@@ -14,3 +14,4 @@ def _no_extra_checks(monkeypatch: pytest.MonkeyPatch) -> None:
     # Fake clients must never write mappings into the shared cache.
     monkeypatch.setattr(settings, "mapping_cache_enabled", False)
     monkeypatch.setattr(settings, "event_path", False)
+    monkeypatch.setattr(settings, "unit_terms", False)

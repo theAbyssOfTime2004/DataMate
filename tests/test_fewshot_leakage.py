@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from datamate.config import settings
-from datamate.query.defined_terms import RANKING_ROW_FEW_SHOTS, TERM_FEW_SHOTS
+from datamate.query.defined_terms import RANKING_ROW_FEW_SHOTS, TERM_FEW_SHOTS, UNIT_ROW_FEW_SHOTS
 from datamate.query.events import EVENT_FEW_SHOT_SETS
 from datamate.query.ext.prompts import EXT_FEW_SHOT_SETS
 from datamate.query.ext.verify import VERIFY_FEW_SHOTS
@@ -18,6 +18,7 @@ from datamate.query.product_match import PRODUCT_MATCH_FEW_SHOTS
 from datamate.query.prompts import FEW_SHOT_SETS
 from datamate.query.rank import RANK_FEW_SHOT_SETS
 from datamate.query.subjective import SUBJECTIVE_FEW_SHOTS
+from datamate.query.units import UNIT_FEW_SHOT_SETS
 from datamate.rules import from_rulebook as rulebook_prompts
 from datamate.rules.parse_rulebook import parse_rulebook
 
@@ -59,10 +60,12 @@ def test_few_shot_questions_stay_below_the_train_similarity_cutoff() -> None:
         *(ex for group in RANK_FEW_SHOT_SETS for ex in group),
         *(ex for group in EVENT_FEW_SHOT_SETS for ex in group),
     ]
-    for example in examples:
-        left = _normalise(example.question)
+    questions = [example.question for example in examples]
+    questions += [text for group in UNIT_FEW_SHOT_SETS for text, _parsed in group]
+    for question in questions:
+        left = _normalise(question)
         closest = max(SequenceMatcher(None, left, right).ratio() for right in references)
-        assert closest < 0.80, f"{example.question!r} similarity {closest:.3f}"
+        assert closest < 0.80, f"{question!r} similarity {closest:.3f}"
 
     # E2 rulebook few-shots (invented English rows; still must not echo train questions).
     rulebook_bits = [
@@ -92,6 +95,7 @@ def test_invented_term_definitions_do_not_echo_the_rulebooks() -> None:
     bits = [
         *(f"{ex.term} {ex.definition}" for ex in TERM_FEW_SHOTS),
         *(f"{ex.term} {ex.definition}" for ex in RANKING_ROW_FEW_SHOTS),
+        *(f"{ex.term} {ex.definition}" for ex in UNIT_ROW_FEW_SHOTS),
         *(f"{ex.term} {ex.definition}" for group in RANK_FEW_SHOT_SETS for ex in group),
     ]
     for bit in bits:

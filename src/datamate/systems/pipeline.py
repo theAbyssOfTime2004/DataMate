@@ -26,9 +26,15 @@ from datamate.metrics.engine import RuleUnsupported
 from datamate.metrics.events import has_event_log
 from datamate.metrics.ext_families import product_base_unit
 from datamate.metrics.rank import answer_rank
+from datamate.metrics.units import answer_unit
 from datamate.parse.text import expand_short_years
 from datamate.query.context import ShopContext, load_shop_context
-from datamate.query.defined_terms import match_defined_term, ranking_rows
+from datamate.query.defined_terms import (
+    match_defined_term,
+    match_unit_term,
+    ranking_rows,
+    unit_rows,
+)
 from datamate.query.events import parse_event_question
 from datamate.query.ext import parse_ext_question
 from datamate.query.ext.verify import verify_description, verify_ext_spec
@@ -45,6 +51,7 @@ from datamate.query.spec import (
     ValueQuery,
 )
 from datamate.query.subjective import subjective_probability
+from datamate.query.units import describe_unit, parse_unit_question
 from datamate.rules import RuleConfig
 from datamate.rules.from_rulebook import RulebookConfig, load_split_rulebook
 from datamate.rules.parse_rulebook import RuleRow
@@ -132,6 +139,7 @@ class PipelineSystem:
         # Rulebook rows that define a ranking term, found once per split.
         self._ranking_rows_by_split: dict[str, list[RuleRow]] = {}
         self._ranking_rows_lock = threading.Lock()
+        self._unit_rows_by_split: dict[str, list[RuleRow]] = {}
 
     @property
     def client(self) -> Any:
@@ -215,7 +223,7 @@ class PipelineSystem:
                     "total_s": trace["timings"].get("total_s"),
                 }
                 try:
-                    return self._parse_and_answer(
+                    answer, trace = self._parse_and_answer(
                         question, bundle, retry_trace, wall_t0, ThinkingClient(self.client)
                     )
                 except Exception as exc:  # noqa: BLE001 — keep the fast-pass abstain
@@ -223,6 +231,8 @@ class PipelineSystem:
                     # (predict would rerun the whole question).
                     trace["thinking_error"] = f"{type(exc).__name__}: {exc}"
                     return answer, trace
+            if answer.type == "abstain" and settings.unit_terms:
+                return self._answer_via_unit(question, split, bundle, answer, trace, wall_t0)
             return answer, trace
         except LLMUnavailable as exc:
             # Infrastructure, not the system's judgement. Nothing is cached for the shop,
@@ -576,6 +586,62 @@ class PipelineSystem:
             answer = answer_rank(bundle.engine, parsed.spec, question.as_of_date)
         trace["timings"]["engine_s"] = round(time.perf_counter() - engine_t0, 6)
         return done(answer, "engine_abstain" if answer.type == "abstain" else None)
+
+    def _answer_via_unit(
+        self,
+        question: Question,
+        split: str,
+        bundle: _BusinessBundle,
+        abstained: Answer,
+        trace: dict[str, Any],
+        wall_t0: float,
+    ) -> tuple[Answer, dict[str, Any]]:
+        """After an abstain: count the shop's record unit when the rulebook names it."""
+        assert bundle.engine is not None
+        with self._ranking_rows_lock:
+            rows = self._unit_rows_by_split.get(split)
+            if rows is None:
+                rows = unit_rows(list(self._rulebook_for(split).notes), self.client)
+                self._unit_rows_by_split[split] = rows
+        term, asked = match_unit_term(question.question, rows, self.client)
+        if asked:
+            trace["unit_term_asked"] = asked
+        if term is None:
+            return abstained, trace
+        parsed = parse_unit_question(
+            question.question,
+            term,
+            self.client,
+            bundle.rules,
+            bundle.calendar,
+            question.as_of_date,
+        )
+        trace["unit_parse_attempts"] = [_attempt_dict(item) for item in parsed.attempts]
+        if parsed.spec is None:
+            trace["unit_reason"] = parsed.reason
+            return abstained, trace
+        description = describe_unit(
+            parsed.spec, term, question.as_of_date, bundle.rules, bundle.calendar
+        )
+        asked_text = f"{question.question}\n(Rulebook: {term.name} = {term.text})"
+        p_yes = verify_description(asked_text, description, self.client)
+        trace["unit_verify_p"] = round(p_yes, 4)
+        trace["unit_verify_description"] = description
+        if p_yes < settings.rank_verify_threshold:
+            trace["unit_reason"] = "unit_verify_low"
+            return abstained, trace
+        with bundle.lock:
+            answer = answer_unit(bundle.engine, parsed.spec, question.as_of_date)
+        if answer.type == "abstain":
+            trace["unit_reason"] = "engine_abstain"
+            return abstained, trace
+        trace["ext_family"] = "unit"
+        trace["spec"] = parsed.spec.model_dump(mode="json")
+        trace["abstain_reason"] = None
+        if answer.type == "unanswerable":
+            trace["unanswerable_reason"] = answer.reason
+        trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
+        return answer, trace
 
     def _rulebook_for(self, split: str) -> RulebookConfig:
         with self._rulebook_lock:
