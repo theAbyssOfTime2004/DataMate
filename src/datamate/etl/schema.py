@@ -255,6 +255,10 @@ DRUG_INFO_COLUMNS: tuple[str, ...] = (
     "src_row",
 )
 
+# Text columns of the sales book that no canonical field takes (vehicle, job, note, ...),
+# one row per order, column header and distinct value.
+ORDER_ATTRIBUTES_COLUMNS: tuple[str, ...] = ("order_id", "name", "value")
+
 # DuckDB must not infer DECIMAL width from the first Python Decimal values.
 DECIMAL_SQL_TYPE = "DECIMAL(18,4)"
 DECIMAL_COLUMNS: frozenset[str] = frozenset(
@@ -291,6 +295,7 @@ TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "employees": EMPLOYEES_COLUMNS,
     "deliveries": DELIVERIES_COLUMNS,
     "drug_info": DRUG_INFO_COLUMNS,
+    "order_attributes": ORDER_ATTRIBUTES_COLUMNS,
 }
 
 ORDERS_DDL = """
@@ -586,6 +591,14 @@ CREATE TABLE drug_info (
 );
 """.strip()
 
+ORDER_ATTRIBUTES_DDL = """
+CREATE TABLE order_attributes (
+    order_id VARCHAR,
+    name VARCHAR,
+    value VARCHAR
+);
+""".strip()
+
 TABLE_DDLS: dict[str, str] = {
     "orders": ORDERS_DDL,
     "order_lines": ORDER_LINES_DDL,
@@ -606,4 +619,5 @@ TABLE_DDLS: dict[str, str] = {
     "employees": EMPLOYEES_DDL,
     "deliveries": DELIVERIES_DDL,
     "drug_info": DRUG_INFO_DDL,
+    "order_attributes": ORDER_ATTRIBUTES_DDL,
 }

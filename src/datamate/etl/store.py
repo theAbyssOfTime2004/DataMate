@@ -18,7 +18,7 @@ from datamate.mapping.fields import FIELD_TYPES, SIMPLE_ENTITIES
 from datamate.mapping.model import Mapping, mapping_fingerprint
 
 # Bump on any change to ETL output shape/semantics (even if mapping fingerprint is unchanged).
-ETL_VERSION = "1.11"  # 1.11: staff nicknames on orders tied to the staff list
+ETL_VERSION = "1.12"  # 1.12: unmapped text columns of the sales book as order_attributes
 
 _TYPE_FROM_FIELD: dict[str, str] = {
     "date": "DATE",
@@ -91,6 +91,7 @@ def _frames_from_canonical(data: CanonicalData) -> dict[str, pd.DataFrame]:
     }
     for entity in SIMPLE_ENTITIES:
         frames[entity] = getattr(data, entity)
+    frames["order_attributes"] = data.order_attributes
     return frames
 
 
@@ -111,9 +112,7 @@ def write_duckdb(data: CanonicalData, path: Path | str) -> None:
             if src_df.empty:
                 continue
             conn.register("_staging_df", src_df)
-            cast_exprs = [
-                f'CAST("{c}" AS {_sql_type_for(tname, c)}) AS "{c}"' for c in cols
-            ]
+            cast_exprs = [f'CAST("{c}" AS {_sql_type_for(tname, c)}) AS "{c}"' for c in cols]
             select_sql = ", ".join(cast_exprs)
             conn.execute(f"INSERT INTO {tname} SELECT {select_sql} FROM _staging_df")
             conn.unregister("_staging_df")
@@ -139,9 +138,7 @@ def load_or_build_canonical(
     report_path = cache_dir / f"{key}.report.json"
 
     if db_path.is_file() and report_path.is_file():
-        report = EtlReport.model_validate(
-            json.loads(report_path.read_text(encoding="utf-8"))
-        )
+        report = EtlReport.model_validate(json.loads(report_path.read_text(encoding="utf-8")))
         return db_path, report
 
     raw = load_business_cached(split, business_id)

@@ -15,3 +15,4 @@ def _no_extra_checks(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "mapping_cache_enabled", False)
     monkeypatch.setattr(settings, "event_path", False)
     monkeypatch.setattr(settings, "unit_terms", False)
+    monkeypatch.setattr(settings, "attribute_path", False)

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from datamate.config import settings
+from datamate.query.attributes import ATTR_FEW_SHOT_SETS
 from datamate.query.defined_terms import RANKING_ROW_FEW_SHOTS, TERM_FEW_SHOTS, UNIT_ROW_FEW_SHOTS
 from datamate.query.events import EVENT_FEW_SHOT_SETS
 from datamate.query.ext.prompts import EXT_FEW_SHOT_SETS
@@ -62,6 +63,7 @@ def test_few_shot_questions_stay_below_the_train_similarity_cutoff() -> None:
     ]
     questions = [example.question for example in examples]
     questions += [text for group in UNIT_FEW_SHOT_SETS for text, _parsed in group]
+    questions += [text for group in ATTR_FEW_SHOT_SETS for text, _parsed in group]
     for question in questions:
         left = _normalise(question)
         closest = max(SequenceMatcher(None, left, right).ratio() for right in references)

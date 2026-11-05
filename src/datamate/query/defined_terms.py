@@ -277,3 +277,17 @@ def _user_content(question: str, term: str, definition: str) -> str:
         f"Rulebook definition: {definition}\n"
         "Does the question ask about this term? Answer yes or no."
     )
+
+
+def related_rows(question: str, rows: list[RuleRow], limit: int = 4) -> list[RuleRow]:
+    """Rule rows whose name shares a word with the question that few row names use."""
+    asked = set(fold(question).split())
+    named = [(row, {w for w in fold(row.name).split() if len(w) >= 3}) for row in rows]
+    spread = Counter(word for _row, words in named for word in words)
+    scored = [
+        (len(rare), index, row)
+        for index, (row, words) in enumerate(named)
+        if (rare := {w for w in words & asked if spread[w] <= _COMMON_PAIR_NAMES})
+    ]
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [row for _n, _i, row in scored[:limit]]

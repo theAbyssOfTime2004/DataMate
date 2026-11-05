@@ -132,6 +132,10 @@ class Settings(BaseSettings):
     # rulebook names it ("lượt xe", "phiếu") is answered by the unit block. On the 124
     # train abstains: 1 answered (right), no new wrongs.
     unit_terms: bool = True
+    # After an abstain, shops whose sales book has extra text columns (vehicle, job, note)
+    # get the attribute block: filter, count, distinct values or a share. No train abstain
+    # reaches it; on an invented salon shop it added 3 right answers and no wrong one.
+    attribute_path: bool = True
     defined_term_threshold: float = 0.9
     rank_verify_threshold: float = 0.9
 

@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from datamate.etl.schema import (
     CUSTOMERS_COLUMNS,
+    ORDER_ATTRIBUTES_COLUMNS,
     ORDER_LINES_COLUMNS,
     ORDERS_COLUMNS,
     PRODUCTS_COLUMNS,
@@ -87,6 +88,7 @@ class CanonicalData:
     employees: pd.DataFrame = field(default_factory=pd.DataFrame)
     deliveries: pd.DataFrame = field(default_factory=pd.DataFrame)
     drug_info: pd.DataFrame = field(default_factory=pd.DataFrame)
+    order_attributes: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 @dataclass
@@ -95,12 +97,14 @@ class _ResolvedChunk:
     df: pd.DataFrame
 
 
+_MAX_ATTRIBUTE_LEN = 200
+
+
 def _available_tables_summary(raw: BusinessRaw) -> str:
     items: list[str] = []
     for rt in raw.tables:
         srcs = ", ".join(
-            f"{s.file}" + (f"!{s.sheet}" if s.sheet is not None else "")
-            for s in rt.sources
+            f"{s.file}" + (f"!{s.sheet}" if s.sheet is not None else "") for s in rt.sources
         )
         items.append(f"{rt.name} (sources: [{srcs}], columns: {rt.columns})")
     return "; ".join(items) if items else "<no tables>"
@@ -382,11 +386,7 @@ def _product_key_by_name(products_df: pd.DataFrame) -> ProductNameIndex:
         if folded is not None:
             keys_by_fold.setdefault(folded, set()).add(key)
     by_norm = {name: next(iter(keys)) for name, keys in keys_by_name.items() if len(keys) == 1}
-    by_fold = {
-        name: next(iter(keys))
-        for name, keys in keys_by_fold.items()
-        if len(keys) == 1
-    }
+    by_fold = {name: next(iter(keys)) for name, keys in keys_by_fold.items() if len(keys) == 1}
     return ProductNameIndex(by_norm=by_norm, by_fold=by_fold)
 
 
@@ -523,7 +523,9 @@ def _build_unit_conversions(
         tracker.record("unit_conversions.base_unit", bunit_raw, bunit is not None)
 
         qty_parsed = parse_qty(factor_raw)
-        factor: Decimal | None = qty_parsed[0] if qty_parsed is not None else parse_decimal(factor_raw)
+        factor: Decimal | None = (
+            qty_parsed[0] if qty_parsed is not None else parse_decimal(factor_raw)
+        )
         tracker.record("unit_conversions.factor", factor_raw, factor is not None)
 
         pkey = _line_product_key(pid, pname, key_by_name or ProductNameIndex({}, {}))
@@ -564,8 +566,7 @@ def _apply_joins(
             if val is None or (isinstance(val, float) and pd.isna(val)):
                 continue
             key_tuple = tuple(
-                _strip_str(str(t_row[rk])) if t_row[rk] is not None else None
-                for rk in remote_keys
+                _strip_str(str(t_row[rk])) if t_row[rk] is not None else None for rk in remote_keys
             )
             if all(k is not None for k in key_tuple) and key_tuple not in lookup:
                 lookup[key_tuple] = val
@@ -574,8 +575,7 @@ def _apply_joins(
             if r.get(target_field) is not None:
                 continue
             l_tuple = tuple(
-                _strip_str(str(r.get(lk))) if r.get(lk) is not None else None
-                for lk in local_keys
+                _strip_str(str(r.get(lk))) if r.get(lk) is not None else None for lk in local_keys
             )
             if all(k is not None for k in l_tuple) and l_tuple in lookup:
                 r[target_field] = lookup[l_tuple]
@@ -673,9 +673,7 @@ def _derive_qty_base(
     single_unit_products = {
         pkey
         for pkey, units in units_seen.items()
-        if len(units) == 1
-        and base_by_key.get(pkey) is None
-        and pkey not in products_with_conv
+        if len(units) == 1 and base_by_key.get(pkey) is None and pkey not in products_with_conv
     }
 
     for pl in lines:
@@ -883,6 +881,13 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
     c_l_lamt = lcols.get("line_amount")
     c_l_cpu = lcols.get("cost_per_unit")
 
+    # Raw columns some canonical field already reads; the other text columns become
+    # order attributes (a vehicle, the job done, a note) that questions may filter on.
+    mapped_raw_cols = set(lcols.values())
+    if is_derived_orders:
+        mapped_raw_cols |= set(orders_tm.columns.values())
+    attribute_rows: set[tuple[str, str, str]] = set()
+
     parsed_lines: list[dict[str, Any]] = []
     raw_lines_for_derived_orders: list[
         tuple[str, str | None, str, Decimal | None, dict[str, str | None]]
@@ -901,6 +906,14 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
             oid_raw = rdict.get(c_l_oid)
             oid = _strip_str(oid_raw)
         tracker.record("order_lines.order_id", oid_raw, oid is not None)
+
+        if oid is not None:
+            for col, cell in rdict.items():
+                if col in mapped_raw_cols:
+                    continue
+                text = _strip_str(cell)
+                if text and len(text) <= _MAX_ATTRIBUTE_LEN and any(ch.isalpha() for ch in text):
+                    attribute_rows.add((oid, unicodedata.normalize("NFC", col), text))
 
         lno_raw = rdict.get(c_l_lno) if c_l_lno is not None else None
         lno = _parse_int_id(lno_raw) if lno_raw is not None else None
@@ -1003,9 +1016,7 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
     walk_in_norm_set = _walk_in_norm_set(mapping.walk_in_values)
 
     orders_with_negative_qty: set[str] = {
-        pl["order_id"]
-        for pl in parsed_lines
-        if pl["order_id"] is not None and pl["is_return_line"]
+        pl["order_id"] for pl in parsed_lines if pl["order_id"] is not None and pl["is_return_line"]
     }
 
     status_overridden_by_return = 0
@@ -1395,7 +1406,9 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
         notes=notes,
     )
 
+    attributes_df = pd.DataFrame(sorted(attribute_rows), columns=list(ORDER_ATTRIBUTES_COLUMNS))
     return CanonicalData(
+        order_attributes=attributes_df,
         orders=orders_df,
         order_lines=order_lines_df,
         products=products_df,

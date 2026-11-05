@@ -22,17 +22,20 @@ from datamate.llm.thinking import ThinkingClient
 from datamate.mapping import Mapping, infer_mapping, mapping_fingerprint
 from datamate.mapping.cache import load_mapping, mapping_cache_path, store_mapping
 from datamate.metrics import MetricEngine
+from datamate.metrics.attributes import answer_attr, shop_attributes
 from datamate.metrics.engine import RuleUnsupported
 from datamate.metrics.events import has_event_log
 from datamate.metrics.ext_families import product_base_unit
 from datamate.metrics.rank import answer_rank
 from datamate.metrics.units import answer_unit
 from datamate.parse.text import expand_short_years
+from datamate.query.attributes import describe_attr, parse_attr_question, readme_column_docs
 from datamate.query.context import ShopContext, load_shop_context
 from datamate.query.defined_terms import (
     match_defined_term,
     match_unit_term,
     ranking_rows,
+    related_rows,
     unit_rows,
 )
 from datamate.query.events import parse_event_question
@@ -112,6 +115,8 @@ class _BusinessBundle:
     rule_notes: list[Any] = field(default_factory=list)
     unsupported_knobs: frozenset[str] = field(default_factory=frozenset)
     rulebook_sha256: str = ""
+    # README descriptions of the sales book's columns ("Xe": "dòng xe và biển số").
+    attribute_docs: dict[str, str] = field(default_factory=dict)
     # DuckDB connections are not thread-safe; engine calls for one shop take turns.
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -232,7 +237,13 @@ class PipelineSystem:
                     trace["thinking_error"] = f"{type(exc).__name__}: {exc}"
                     return answer, trace
             if answer.type == "abstain" and settings.unit_terms:
-                return self._answer_via_unit(question, split, bundle, answer, trace, wall_t0)
+                answer, trace = self._answer_via_unit(
+                    question, split, bundle, answer, trace, wall_t0
+                )
+            if answer.type == "abstain" and settings.attribute_path:
+                answer, trace = self._answer_via_attributes(
+                    question, split, bundle, answer, trace, wall_t0
+                )
             return answer, trace
         except LLMUnavailable as exc:
             # Infrastructure, not the system's judgement. Nothing is cached for the shop,
@@ -643,6 +654,56 @@ class PipelineSystem:
         trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
         return answer, trace
 
+    def _answer_via_attributes(
+        self,
+        question: Question,
+        split: str,
+        bundle: _BusinessBundle,
+        abstained: Answer,
+        trace: dict[str, Any],
+        wall_t0: float,
+    ) -> tuple[Answer, dict[str, Any]]:
+        """After an abstain: filter, count or share the records by the book's text columns."""
+        assert bundle.engine is not None
+        with bundle.lock:
+            attributes = shop_attributes(bundle.engine, bundle.attribute_docs)
+        if not attributes:
+            return abstained, trace
+        rows = related_rows(question.question, list(self._rulebook_for(split).notes))
+        parsed = parse_attr_question(
+            question.question,
+            attributes,
+            rows,
+            self.client,
+            bundle.rules,
+            bundle.calendar,
+            question.as_of_date,
+        )
+        trace["attr_parse_attempts"] = [_attempt_dict(item) for item in parsed.attempts]
+        if parsed.spec is None:
+            trace["attr_reason"] = parsed.reason
+            return abstained, trace
+        description = describe_attr(parsed.spec, question.as_of_date, bundle.rules, bundle.calendar)
+        rules_text = "".join(f"\n(Rulebook: {row.name} = {row.text})" for row in rows)
+        p_yes = verify_description(question.question + rules_text, description, self.client)
+        trace["attr_verify_p"] = round(p_yes, 4)
+        trace["attr_verify_description"] = description
+        if p_yes < settings.rank_verify_threshold:
+            trace["attr_reason"] = "attr_verify_low"
+            return abstained, trace
+        with bundle.lock:
+            answer = answer_attr(bundle.engine, parsed.spec, question.as_of_date)
+        if answer.type == "abstain":
+            trace["attr_reason"] = "engine_abstain"
+            return abstained, trace
+        trace["ext_family"] = "attr"
+        trace["spec"] = parsed.spec.model_dump(mode="json")
+        trace["abstain_reason"] = None
+        if answer.type == "unanswerable":
+            trace["unanswerable_reason"] = answer.reason
+        trace["timings"]["total_s"] = round(time.perf_counter() - wall_t0, 6)
+        return answer, trace
+
     def _rulebook_for(self, split: str) -> RulebookConfig:
         with self._rulebook_lock:
             cached = self._rulebook_by_split.get(split)
@@ -725,6 +786,7 @@ class PipelineSystem:
             rule_notes=list(rulebook.notes),
             unsupported_knobs=unsupported,
             rulebook_sha256=rulebook.rulebook_sha256,
+            attribute_docs=readme_column_docs(profile.readme_text),
         )
         self._by_business[key] = bundle
         return bundle
