@@ -15,6 +15,7 @@ from datamate.query.ext.spec import (
     DebtAgingQuery,
     DebtCollectedQuery,
     DebtTotalQuery,
+    DeliveryCountQuery,
     EmployeeRevenueQuery,
     ExtQuerySpec,
     GrossProfitQuery,
@@ -24,6 +25,7 @@ from datamate.query.ext.spec import (
     NetProfitQuery,
     NoneQuery,
     OrdersMinAmountQuery,
+    OrdersMinDeliveriesQuery,
     OtcRevenueQuery,
     OutOfStockCountQuery,
     PriceIncreaseEffectQuery,
@@ -353,6 +355,20 @@ def describe_ext_spec(
             "source: order_lines cost_per_unit + expenses table",
             _period_line(spec.period, as_of, rules, cal),
             "output: one number (VND)",
+        )
+    if isinstance(spec, DeliveryCountQuery):
+        return _lines(
+            "measure: number of delivery batches (each batch of each order counts once)",
+            "source: delivery log, by delivery date (also batches of orders returned later)",
+            f"period: {_period_span(spec.period, as_of, rules, cal)} (delivery date)",
+            "output: one number",
+        )
+    if isinstance(spec, OrdersMinDeliveriesQuery):
+        return _lines(
+            f"measure: number of orders delivered in at least {spec.n} batches",
+            f"orders: placed in the period; batches delivered up to {as_of.isoformat()}",
+            _period_line(spec.period, as_of, rules, cal),
+            "output: one number (orders)",
         )
     if isinstance(spec, TopEmployeeQuery):
         return _lines(

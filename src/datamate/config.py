@@ -40,9 +40,10 @@ def _default_enabled_families() -> list[str]:
         "gross_profit",
         "top_employee",
         "employee_revenue",
+        "delivery_count",
         # Off until dev shows >= 90% (no dev question reached them yet; lot remaining also
         # needs purchase-line lots and returns): out_of_stock_count, lots_expiring,
-        # nearest_expiry_lot, net_profit.
+        # nearest_expiry_lot, net_profit, orders_min_deliveries (no train question).
     ]
 
 
@@ -116,6 +117,13 @@ class Settings(BaseSettings):
     # 176 train questions rewritten with invented terms: 168 right, 0 wrong; real
     # dev/val/holdout answers unchanged.
     defined_term_check: bool = True
+    # Store each shop's inferred mapping on disk (keyed by its files, the model and the
+    # mapping/ETL code), so a new run skips the two validation ETL passes per shop.
+    mapping_cache_enabled: bool = True
+    # Ext families over per-order event logs (delivery batches). Off restores the ext
+    # prompt and schema exactly as they were before these families. Off until a
+    # same-GPU comparison shows no new wrongs (the first run mixed GPU change and prompt).
+    event_families: bool = False
     defined_term_threshold: float = 0.9
     rank_verify_threshold: float = 0.9
 

@@ -90,15 +90,37 @@ def _fit_messages(
     client: Any,
 ) -> tuple[list[dict[str, str]], int]:
     total = len(FEW_SHOT_SETS[few_shot_set % len(FEW_SHOT_SETS)])
-    keep = total
-    while True:
-        messages = build_messages(question, as_of, ctx, few_shot_set, example_limit=keep)
-        if (
-            keep == 0
-            or client.count_tokens(_prompt_text(messages)) <= settings.llm_prompt_budget_tokens
-        ):
-            return messages, total - keep
-        keep -= 1
+    return fit_examples(
+        total,
+        lambda keep: build_messages(question, as_of, ctx, few_shot_set, example_limit=keep),
+        client,
+    )
+
+
+def fit_examples(
+    total: int,
+    build: Callable[[int], list[dict[str, str]]],
+    client: Any,
+) -> tuple[list[dict[str, str]], int]:
+    """Messages with the most leading few-shots that fit the prompt budget, and how many
+    were dropped. More examples never make a prompt shorter, so a binary search finds the
+    same cut as dropping one at a time, with a few token counts instead of one per example
+    (each count is a server round trip)."""
+
+    def fits(keep: int) -> bool:
+        tokens = client.count_tokens(_prompt_text(build(keep)))
+        return keep == 0 or tokens <= settings.llm_prompt_budget_tokens
+
+    if fits(total):
+        return build(total), 0
+    lo, hi = 0, total  # fits(lo) holds; fits(hi) does not
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if fits(mid):
+            lo = mid
+        else:
+            hi = mid
+    return build(lo), total - lo
 
 
 def _prompt_text(messages: list[dict[str, str]]) -> str:

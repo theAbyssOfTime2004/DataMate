@@ -4,8 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from datamate.config import settings
 from datamate.query.context import ShopContext
-from datamate.query.ext.spec import E4A_FAMILIES, E4B_FAMILIES, E4C_FAMILIES, E4D_FAMILIES
+from datamate.query.ext.spec import (
+    E4A_FAMILIES,
+    E4B_FAMILIES,
+    E4C_FAMILIES,
+    E4D_FAMILIES,
+    EVENT_FAMILIES,
+)
 from datamate.query.parse_schema import PERIOD_FIELDS, PERIOD_KINDS
 
 EXT_TOP_LEVEL_KEYS: tuple[str, ...] = (
@@ -79,7 +86,14 @@ def _sizes_in_shop(product_names: list[str]) -> list[str]:
 
 def ext_parsed_schema(ctx: ShopContext, products: list[str]) -> dict[str, Any]:
     """Enums for product / base_unit / category / size come from the shop."""
-    family_enum = [*E4A_FAMILIES, *E4B_FAMILIES, *E4C_FAMILIES, *E4D_FAMILIES, "none"]
+    family_enum = [
+        *E4A_FAMILIES,
+        *E4B_FAMILIES,
+        *E4C_FAMILIES,
+        *E4D_FAMILIES,
+        *(EVENT_FAMILIES if settings.event_families else ()),
+        "none",
+    ]
     sizes = _sizes_in_shop(ctx.product_names)
     size_schema: dict[str, Any]
     if sizes:

@@ -321,6 +321,8 @@ FAMILY_DEPENDS_ON: dict[str, frozenset[str]] = {
     "net_profit": frozenset({"revenue_statuses", "exclude_orders_with_return"}),
     "top_employee": frozenset({"revenue_statuses", "exclude_orders_with_return"}),
     "employee_revenue": frozenset({"revenue_statuses", "exclude_orders_with_return"}),
+    "delivery_count": frozenset(),
+    "orders_min_deliveries": frozenset(),
 }
 
 

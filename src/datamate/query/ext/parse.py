@@ -16,10 +16,10 @@ from datamate.query.adjudicate import differ_only_in_ranges, pick_period_reading
 from datamate.query.context import ShopContext
 from datamate.query.convert import ConvertError
 from datamate.query.ext.convert import to_ext_query_spec
-from datamate.query.ext.prompts import EXT_FEW_SHOT_SETS, build_ext_messages
+from datamate.query.ext.prompts import build_ext_messages, ext_few_shots
 from datamate.query.ext.schema import EXT_TOP_LEVEL_KEYS, ext_parsed_schema
 from datamate.query.ext.spec import ExtQuerySpec, NoneQuery
-from datamate.query.parse import ParseAttempt
+from datamate.query.parse import ParseAttempt, fit_examples
 from datamate.query.product_match import product_matcher
 from datamate.rules.model import RuleConfig
 from datamate.timeres.calendar import CalendarError, LunarCalendar
@@ -82,20 +82,12 @@ def _fit_messages(
     few_shot_set: int,
     client: Any,
 ) -> tuple[list[dict[str, str]], int]:
-    total = len(EXT_FEW_SHOT_SETS[few_shot_set % len(EXT_FEW_SHOT_SETS)])
-    keep = total
-    while True:
-        messages = build_ext_messages(question, as_of, ctx, few_shot_set, example_limit=keep)
-        if (
-            keep == 0
-            or client.count_tokens(_prompt_text(messages)) <= settings.llm_prompt_budget_tokens
-        ):
-            return messages, total - keep
-        keep -= 1
-
-
-def _prompt_text(messages: list[dict[str, str]]) -> str:
-    return "\n".join(f"{message['role']}\n{message['content']}" for message in messages)
+    total = len(ext_few_shots(few_shot_set))
+    return fit_examples(
+        total,
+        lambda keep: build_ext_messages(question, as_of, ctx, few_shot_set, example_limit=keep),
+        client,
+    )
 
 
 def _vote(

@@ -16,10 +16,11 @@ from datamate.config import settings
 from datamate.etl import load_or_build_canonical
 from datamate.io.profile import BusinessProfile, profile_business
 from datamate.io.questions import Question
-from datamate.io.raw import BusinessRaw, load_business_cached
+from datamate.io.raw import BusinessRaw, business_files_key, load_business_cached
 from datamate.llm import LLMUnavailable, get_client
 from datamate.llm.thinking import ThinkingClient
 from datamate.mapping import Mapping, infer_mapping, mapping_fingerprint
+from datamate.mapping.cache import load_mapping, mapping_cache_path, store_mapping
 from datamate.metrics import MetricEngine
 from datamate.metrics.engine import RuleUnsupported
 from datamate.metrics.ext_families import product_base_unit
@@ -69,13 +70,23 @@ def llm_mapping_provider(
     client: Any,
 ) -> Mapping | None:
     """Infer a mapping; return None when inference fails or validator errors remain."""
-    del split, business_id
+    cache_path = None
+    if raw.business_dir.is_dir():
+        cache_path = mapping_cache_path(
+            split, business_id, business_files_key(raw.business_dir), client
+        )
+    if cache_path is not None:
+        cached = load_mapping(cache_path)
+        if cached is not None:
+            return cached
     result = infer_mapping(raw, profile, client)
-    if result.mapping is None:
-        return None
+    mapping = result.mapping
     if result.errors or any(issue.severity == "error" for issue in result.issues):
-        return None
-    return result.mapping
+        mapping = None
+    # Failures are not stored: an unreachable LLM must not stick to the shop.
+    if cache_path is not None and mapping is not None:
+        store_mapping(cache_path, mapping)
+    return mapping
 
 
 @dataclass

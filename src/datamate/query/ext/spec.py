@@ -41,6 +41,8 @@ ExtFamily = Literal[
     "net_profit",
     "top_employee",
     "employee_revenue",
+    "delivery_count",
+    "orders_min_deliveries",
     "none",
 ]
 
@@ -336,6 +338,25 @@ class EmployeeRevenueQuery(BaseModel):
     period: PeriodExpr
 
 
+class DeliveryCountQuery(BaseModel):
+    """Delivery batches (one per order and batch number) whose delivery date is in the period."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["delivery_count"] = "delivery_count"
+    period: PeriodExpr
+
+
+class OrdersMinDeliveriesQuery(BaseModel):
+    """Orders placed in the period that had at least n delivery batches by the as-of day."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    family: Literal["orders_min_deliveries"] = "orders_min_deliveries"
+    n: int = Field(ge=1)
+    period: PeriodExpr
+
+
 class NoneQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -375,6 +396,8 @@ ExtQuerySpec = Annotated[
     | NetProfitQuery
     | TopEmployeeQuery
     | EmployeeRevenueQuery
+    | DeliveryCountQuery
+    | OrdersMinDeliveriesQuery
     | NoneQuery,
     Field(discriminator="family"),
 ]
@@ -421,4 +444,10 @@ E4D_FAMILIES: tuple[str, ...] = (
     "net_profit",
     "top_employee",
     "employee_revenue",
+)
+
+# Event logs kept per order (delivery batches); see metrics/events.py.
+EVENT_FAMILIES: tuple[str, ...] = (
+    "delivery_count",
+    "orders_min_deliveries",
 )

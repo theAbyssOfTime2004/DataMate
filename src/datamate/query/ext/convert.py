@@ -20,6 +20,7 @@ from datamate.query.ext.spec import (
     DebtAgingQuery,
     DebtCollectedQuery,
     DebtTotalQuery,
+    DeliveryCountQuery,
     EmployeeRevenueQuery,
     ExtQuerySpec,
     GrossProfitQuery,
@@ -29,6 +30,7 @@ from datamate.query.ext.spec import (
     NetProfitQuery,
     NoneQuery,
     OrdersMinAmountQuery,
+    OrdersMinDeliveriesQuery,
     OtcRevenueQuery,
     OutOfStockCountQuery,
     PriceIncreaseEffectQuery,
@@ -267,6 +269,13 @@ def to_ext_query_spec(
             raise ConvertError(f"employee {employee!r} is not grounded in the question")
         period = _need_period(parsed.get("period"), as_of, "period")
         return EmployeeRevenueQuery(employee=employee, period=period)
+    if family == "delivery_count":
+        period = _need_period(parsed.get("period"), as_of, "period")
+        return DeliveryCountQuery(period=period)
+    if family == "orders_min_deliveries":
+        period = _need_period(parsed.get("period"), as_of, "period")
+        n = _need_int(parsed.get("n"), "n")
+        return OrdersMinDeliveriesQuery(n=n, period=period)
     raise ConvertError(f"unknown family {family!r}")
 
 

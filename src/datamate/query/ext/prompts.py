@@ -7,7 +7,9 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from datamate.config import settings
 from datamate.query.context import ShopContext
+from datamate.query.ext.spec import EVENT_FAMILIES
 from datamate.query.parse_schema import PERIOD_FIELDS
 
 _WEEKDAYS = ("Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ Nhật")
@@ -96,8 +98,12 @@ _SYSTEM = "\n".join(  # noqa: FLY002
         "- top_employee: employee with highest revenue in the period.",
         "- employee_revenue: revenue of the orders one employee sold in the period.",
         "  employee = the code or name copied from the question.",
-        "- none: shop-wide revenue totals, deliveries, or anything this list cannot",
-        "  express.",
+        "- delivery_count: delivery batches (đợt / lượt / lần giao, chuyến chở) whose",
+        "  delivery date is in the period; each batch of each order counts once.",
+        "- orders_min_deliveries: orders placed in the period that were delivered in at",
+        "  least n batches up to today. n + period.",
+        "- none: shop-wide revenue totals, delivered quantities, or anything this list",
+        "  cannot express.",
         "",
         "Count vs list vs share vs cost: how many without listing -> count; list/name ->",
         "list; percent of customers -> share; lot cost value -> cost.",
@@ -114,6 +120,21 @@ _SYSTEM = "\n".join(  # noqa: FLY002
         "customer are free text copied from the question when needed.",
         "The worked examples use an invented grocery/cafe, Cửa hàng An Bình.",
     ]
+)
+
+
+# The same prompt without the event families (settings.event_families off).
+_EVENT_LINES = (
+    "- delivery_count: delivery batches (đợt / lượt / lần giao, chuyến chở) whose\n"
+    "  delivery date is in the period; each batch of each order counts once.\n"
+    "- orders_min_deliveries: orders placed in the period that were delivered in at\n"
+    "  least n batches up to today. n + period.\n"
+    "- none: shop-wide revenue totals, delivered quantities, or anything this list\n"
+    "  cannot express."
+)
+_SYSTEM_NO_EVENTS = _SYSTEM.replace(
+    _EVENT_LINES,
+    "- none: shop-wide revenue totals, deliveries, or anything this list cannot\n  express.",
 )
 
 
@@ -273,6 +294,12 @@ EXT_FEW_SHOT_SETS: tuple[tuple[ExtFewShot, ...], ...] = (
             product="Sữa tươi hộp",
             unit="hộp",
             date=_period("today"),
+        ),
+        _ex(
+            "Thang 6/2024 xe cua An Binh di giao tong cong bao nhieu chuyen",
+            _ASOF,
+            family="delivery_count",
+            period=_period("month", month=6, year=2024),
         ),
         _ex(
             "Quy 3/2024 cua hang An Binh dem bill co doanh so >= 275000 ra bao nhieu",
@@ -518,6 +545,13 @@ EXT_FEW_SHOT_SETS: tuple[tuple[ExtFewShot, ...], ...] = (
             period=_period("week_this"),
         ),
         _ex(
+            "Don dat trong quy 2/2024 o An Binh, toi gio co may don chia ra giao tu 3 lan",
+            _ASOF,
+            family="orders_min_deliveries",
+            n=3,
+            period=_period("quarter", q=2, year=2024),
+        ),
+        _ex(
             "Ban hang ma BH07 o An Binh tuan truoc mang ve bao nhieu",
             _ASOF,
             family="employee_revenue",
@@ -528,6 +562,14 @@ EXT_FEW_SHOT_SETS: tuple[tuple[ExtFewShot, ...], ...] = (
 )
 
 
+def ext_few_shots(few_shot_set: int) -> tuple[ExtFewShot, ...]:
+    """One vote's few-shots; event-family examples only while those families are on."""
+    examples = EXT_FEW_SHOT_SETS[few_shot_set % len(EXT_FEW_SHOT_SETS)]
+    if settings.event_families:
+        return examples
+    return tuple(ex for ex in examples if ex.parsed["family"] not in EVENT_FAMILIES)
+
+
 def build_ext_messages(
     question_text: str,
     as_of: datetime.date,
@@ -535,10 +577,11 @@ def build_ext_messages(
     few_shot_set: int,
     example_limit: int | None = None,
 ) -> list[dict[str, str]]:
-    examples = EXT_FEW_SHOT_SETS[few_shot_set % len(EXT_FEW_SHOT_SETS)]
+    examples = ext_few_shots(few_shot_set)
     if example_limit is not None:
         examples = examples[: max(example_limit, 0)]
-    messages = [{"role": "system", "content": _SYSTEM}]
+    system = _SYSTEM if settings.event_families else _SYSTEM_NO_EVENTS
+    messages = [{"role": "system", "content": system}]
     for example in examples:
         messages.append(
             {

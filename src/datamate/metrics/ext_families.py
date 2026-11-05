@@ -80,8 +80,12 @@ def answer_ext_family(engine: MetricEngine, spec: ExtQuerySpec, as_of: datetime.
             return _debt_collected(engine, spec, as_of)
         if isinstance(spec, CustomerDebtFlowQuery):
             return _customer_debt_flow(engine, spec, as_of)
+        from datamate.metrics.events import answer_event_family
         from datamate.metrics.ext_e4d import answer_e4d
 
+        events = answer_event_family(engine, spec, as_of)
+        if events is not None:
+            return events
         e4d = answer_e4d(engine, spec, as_of)
         if e4d is not None:
             return e4d

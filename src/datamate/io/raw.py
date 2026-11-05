@@ -724,6 +724,11 @@ def _compute_business_cache_key(bdir: Path) -> str:
     return hasher.hexdigest()
 
 
+def business_files_key(bdir: Path) -> str:
+    """Hash of the reader version and every file in a shop folder."""
+    return _compute_business_cache_key(bdir)
+
+
 def load_business_cached(split: str, business_id: str) -> BusinessRaw:
     bdir = business_dir(split, business_id)
     key = _compute_business_cache_key(bdir)

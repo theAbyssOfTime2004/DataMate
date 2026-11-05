@@ -11,3 +11,5 @@ def _no_extra_checks(monkeypatch: pytest.MonkeyPatch) -> None:
     # rulebook-term checks have their own tests that turn them back on.
     monkeypatch.setattr(settings, "subjective_check", False)
     monkeypatch.setattr(settings, "defined_term_check", False)
+    # Fake clients must never write mappings into the shared cache.
+    monkeypatch.setattr(settings, "mapping_cache_enabled", False)
