@@ -124,6 +124,10 @@ class Settings(BaseSettings):
     # prompt and schema exactly as they were before these families. Off until a
     # same-GPU comparison shows no new wrongs (the first run mixed GPU change and prompt).
     event_families: bool = False
+    # Shops with a delivery log ask a separate event parser first (delivery batches);
+    # the extension prompt stays unchanged. Same-GPU check on the 117 ext questions of
+    # the delivery shops: dev +6, val +3, no new wrongs.
+    event_path: bool = True
     defined_term_threshold: float = 0.9
     rank_verify_threshold: float = 0.9
 

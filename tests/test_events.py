@@ -11,6 +11,7 @@ import pytest
 from datamate.config import settings
 from datamate.etl.schema import TABLE_DDLS
 from datamate.metrics import MetricEngine
+from datamate.query.events import parse_event_question
 from datamate.query.ext.convert import to_ext_query_spec
 from datamate.query.ext.prompts import EXAMPLE_CONTEXT, build_ext_messages
 from datamate.query.ext.schema import ext_parsed_schema
@@ -118,3 +119,36 @@ def test_event_families_off_restores_the_old_ext_prompt(
     assert hashlib.sha256(blob).hexdigest() == _EXT_PROMPT_SHA256_BEFORE_EVENTS[few_shot_set]
     schema = ext_parsed_schema(EXAMPLE_CONTEXT, [])
     assert "delivery_count" not in schema["properties"]["family"]["enum"]
+
+
+class _EventClient:
+    def __init__(self, *answers: dict[str, object]) -> None:
+        self.answers = list(answers)
+
+    def chat_json(self, messages: object, schema: object, name: str, **_: object) -> object:
+        del messages, schema, name
+        return self.answers.pop(0)
+
+
+_JUNE = {
+    "kind": "month",
+    "date": None,
+    "start": None,
+    "end": None,
+    "n": None,
+    "month": 6,
+    "q": None,
+    "year": 2026,
+    "year_rel": None,
+    "n_days": None,
+}
+
+
+def test_event_parser_needs_both_votes() -> None:
+    count = {"family": "delivery_count", "n": None, "period": _JUNE}
+    none = {"family": "none", "n": None, "period": None}
+    cal, rules = LunarCalendar({}), RuleConfig()
+    agreed = parse_event_question("q", _EventClient(count, count), rules, cal, AS_OF)
+    assert isinstance(agreed.spec, DeliveryCountQuery)
+    handed_on = parse_event_question("q", _EventClient(count, none), rules, cal, AS_OF)
+    assert handed_on.spec is None and handed_on.reason == "out_of_scope"

@@ -23,11 +23,13 @@ from datamate.mapping import Mapping, infer_mapping, mapping_fingerprint
 from datamate.mapping.cache import load_mapping, mapping_cache_path, store_mapping
 from datamate.metrics import MetricEngine
 from datamate.metrics.engine import RuleUnsupported
+from datamate.metrics.events import has_event_log
 from datamate.metrics.ext_families import product_base_unit
 from datamate.metrics.rank import answer_rank
 from datamate.parse.text import expand_short_years
 from datamate.query.context import ShopContext, load_shop_context
 from datamate.query.defined_terms import match_defined_term, ranking_rows
+from datamate.query.events import parse_event_question
 from datamate.query.ext import parse_ext_question
 from datamate.query.ext.verify import verify_description, verify_ext_spec
 from datamate.query.parse import ParseAttempt, parse_question
@@ -302,14 +304,32 @@ class PipelineSystem:
     ) -> tuple[Answer, dict[str, Any]]:
         assert bundle.engine is not None and bundle.context is not None
         ext_t0 = time.perf_counter()
-        ext = parse_ext_question(
-            question.question,
-            bundle.context,
-            parse_client,
-            bundle.rules,
-            bundle.calendar,
-            question.as_of_date,
-        )
+        ext = None
+        if settings.event_path:
+            with bundle.lock:
+                has_log = has_event_log(bundle.engine)
+            if has_log:
+                # Shops with a delivery log: event questions first, everything else goes
+                # on to the unchanged extension parser.
+                event = parse_event_question(
+                    question.question,
+                    parse_client,
+                    bundle.rules,
+                    bundle.calendar,
+                    question.as_of_date,
+                )
+                trace["event_parse_attempts"] = [_attempt_dict(item) for item in event.attempts]
+                if event.spec is not None:
+                    ext = event
+        if ext is None:
+            ext = parse_ext_question(
+                question.question,
+                bundle.context,
+                parse_client,
+                bundle.rules,
+                bundle.calendar,
+                question.as_of_date,
+            )
         trace["timings"]["ext_parse_s"] = round(time.perf_counter() - ext_t0, 6)
         trace["timings"]["parse_s"] = round(time.perf_counter() - parse_t0, 6)
         trace["ext_parse_attempts"] = [_attempt_dict(item) for item in ext.attempts]

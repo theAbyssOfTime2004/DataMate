@@ -30,6 +30,13 @@ class EventSource:
 DELIVERY = EventSource(table="deliveries", date_column="delivery_date", event_column="batch_no")
 
 
+def has_event_log(engine: MetricEngine) -> bool:
+    """True when the shop keeps at least one dated event (a delivery batch)."""
+    from datamate.metrics.ext_families import _ext_recorded
+
+    return _ext_recorded(engine, DELIVERY.table, DELIVERY.date_column)
+
+
 def answer_event_family(engine: MetricEngine, spec: object, as_of: datetime.date) -> Answer | None:
     """Answer an event family; None when `spec` is not one."""
     if isinstance(spec, DeliveryCountQuery):

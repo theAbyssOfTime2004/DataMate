@@ -10,6 +10,7 @@ import pytest
 
 from datamate.config import settings
 from datamate.query.defined_terms import RANKING_ROW_FEW_SHOTS, TERM_FEW_SHOTS
+from datamate.query.events import EVENT_FEW_SHOT_SETS
 from datamate.query.ext.prompts import EXT_FEW_SHOT_SETS
 from datamate.query.ext.verify import VERIFY_FEW_SHOTS
 from datamate.query.plan import parse as plan_parse
@@ -56,6 +57,7 @@ def test_few_shot_questions_stay_below_the_train_similarity_cutoff() -> None:
         *PRODUCT_MATCH_FEW_SHOTS,
         *TERM_FEW_SHOTS,
         *(ex for group in RANK_FEW_SHOT_SETS for ex in group),
+        *(ex for group in EVENT_FEW_SHOT_SETS for ex in group),
     ]
     for example in examples:
         left = _normalise(example.question)
