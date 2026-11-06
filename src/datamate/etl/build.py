@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from datamate.etl.schema import (
     CUSTOMERS_COLUMNS,
+    ORDER_ADJUSTMENTS_COLUMNS,
     ORDER_ATTRIBUTES_COLUMNS,
     ORDER_LINES_COLUMNS,
     ORDERS_COLUMNS,
@@ -89,6 +90,7 @@ class CanonicalData:
     deliveries: pd.DataFrame = field(default_factory=pd.DataFrame)
     drug_info: pd.DataFrame = field(default_factory=pd.DataFrame)
     order_attributes: pd.DataFrame = field(default_factory=pd.DataFrame)
+    order_adjustments: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 @dataclass
@@ -625,6 +627,42 @@ def _synthetic_order_id(file_name: str, sheet_name: str | None, row_no: int) -> 
 _BLANK_STATUS_SHARE = 0.5
 
 
+def split_adjustment_lines(
+    lines: list[dict[str, Any]], products_df: pd.DataFrame
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Take out lines that are order-level money, not goods.
+
+    A line name that is not in the shop's product catalog and never brings money in
+    (every amount below or at zero, some below) is a voucher, points or similar discount
+    on the whole order. The rulebook keeps such discounts out of revenue. Without a
+    catalog nothing is taken out (returns of real goods also carry negative amounts).
+    """
+    if products_df.empty:
+        return lines, []
+    catalog = set(products_df["product_key"].dropna())
+    amounts: dict[str, list[Any]] = {}
+    for line in lines:
+        name = line.get("product_name")
+        if name and line.get("product_key") not in catalog:
+            amounts.setdefault(name, []).append(line.get("line_amount"))
+    labels = {
+        name
+        for name, values in amounts.items()
+        if values
+        and all(v is not None and v <= 0 for v in values)
+        and any(v < 0 for v in values)
+    }
+    if not labels:
+        return lines, []
+    kept = [line for line in lines if line.get("product_name") not in labels]
+    moved = [
+        {"order_id": line["order_id"], "label": line["product_name"], "amount": -line["line_amount"]}
+        for line in lines
+        if line.get("product_name") in labels
+    ]
+    return kept, moved
+
+
 def _derive_qty_base(
     lines: list[dict[str, Any]],
     products_df: pd.DataFrame,
@@ -999,6 +1037,9 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
         if pl["line_no"] is None:
             pl["line_no"] = line_seq_counter[oid_key]
     _merge_non_catalog_folded_keys(parsed_lines, products_df)
+    parsed_lines, adjustment_rows = split_adjustment_lines(parsed_lines, products_df)
+    if adjustment_rows:
+        notes.append(f"order adjustment lines kept apart from goods: {len(adjustment_rows)}")
 
     # Derive qty_base when the mapping has no qty_base column.
     if c_l_qbase is None:
@@ -1409,6 +1450,7 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
     attributes_df = pd.DataFrame(sorted(attribute_rows), columns=list(ORDER_ATTRIBUTES_COLUMNS))
     return CanonicalData(
         order_attributes=attributes_df,
+        order_adjustments=_records_to_df(adjustment_rows, ORDER_ADJUSTMENTS_COLUMNS),
         orders=orders_df,
         order_lines=order_lines_df,
         products=products_df,

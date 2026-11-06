@@ -258,6 +258,8 @@ DRUG_INFO_COLUMNS: tuple[str, ...] = (
 # Text columns of the sales book that no canonical field takes (vehicle, job, note, ...),
 # one row per order, column header and distinct value.
 ORDER_ATTRIBUTES_COLUMNS: tuple[str, ...] = ("order_id", "name", "value")
+# Order-level money lines written among the goods ("Voucher", "Dùng 200 điểm").
+ORDER_ADJUSTMENTS_COLUMNS: tuple[str, ...] = ("order_id", "label", "amount")
 
 # DuckDB must not infer DECIMAL width from the first Python Decimal values.
 DECIMAL_SQL_TYPE = "DECIMAL(18,4)"
@@ -296,6 +298,7 @@ TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "deliveries": DELIVERIES_COLUMNS,
     "drug_info": DRUG_INFO_COLUMNS,
     "order_attributes": ORDER_ATTRIBUTES_COLUMNS,
+    "order_adjustments": ORDER_ADJUSTMENTS_COLUMNS,
 }
 
 ORDERS_DDL = """
@@ -599,6 +602,14 @@ CREATE TABLE order_attributes (
 );
 """.strip()
 
+ORDER_ADJUSTMENTS_DDL = """
+CREATE TABLE order_adjustments (
+    order_id VARCHAR,
+    label VARCHAR,
+    amount BIGINT
+);
+""".strip()
+
 TABLE_DDLS: dict[str, str] = {
     "orders": ORDERS_DDL,
     "order_lines": ORDER_LINES_DDL,
@@ -620,4 +631,5 @@ TABLE_DDLS: dict[str, str] = {
     "deliveries": DELIVERIES_DDL,
     "drug_info": DRUG_INFO_DDL,
     "order_attributes": ORDER_ATTRIBUTES_DDL,
+    "order_adjustments": ORDER_ADJUSTMENTS_DDL,
 }
