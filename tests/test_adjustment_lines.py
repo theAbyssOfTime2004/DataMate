@@ -28,3 +28,12 @@ def test_without_a_catalog_nothing_moves() -> None:
     lines = [_line("o1", "x1", "Voucher", -10000)]
     kept, moved = split_adjustment_lines(lines, pd.DataFrame(columns=["product_key"]))
     assert kept == lines and moved == []
+
+
+def test_quarantined_fields_turn_unanswerable_into_abstain() -> None:
+    from datamate.systems.pipeline import quarantine_hit
+
+    assert quarantine_hit("shop does not record payment_method", ["orders.payment_method"])
+    assert quarantine_hit("shop does not record purchases.total_amount", ["purchases"])
+    assert not quarantine_hit("shop does not record category", ["orders.payment_method"])
+    assert not quarantine_hit("period lies entirely outside the shop's data", ["debts"])

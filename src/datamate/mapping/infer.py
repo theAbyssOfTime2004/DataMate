@@ -1255,6 +1255,9 @@ def infer_mapping(
     issues, canon = validate_mapping(raw, mapping)
     dropped_notes: list[Issue] = list(early_warnings)
     retried_drops: set[str] = set()
+    # Fields and entities the shop has but whose mapping failed the checks: questions
+    # on them abstain instead of being called unanswerable.
+    quarantined: set[str] = set()
     issues = [*dropped_notes, *issues]
 
     # Repair loop: at most 2 repair rounds.
@@ -1281,8 +1284,8 @@ def infer_mapping(
             entity_name, field_name = qualified.split(".", 1)
             ent_drop: Entity = entity_name  # type: ignore[assignment]
             cols = entity_columns.get(ent_drop)
-            if cols is not None:
-                cols.pop(field_name, None)
+            if cols is not None and cols.pop(field_name, None) is not None:
+                quarantined.add(qualified)
             dropped_notes.append(
                 Issue(
                     step=iss.step,
@@ -1439,8 +1442,8 @@ def infer_mapping(
             entity_name, field_name = qualified.split(".", 1)
             ent_drop: Entity = entity_name  # type: ignore[assignment]
             cols = entity_columns.get(ent_drop)
-            if cols is not None:
-                cols.pop(field_name, None)
+            if cols is not None and cols.pop(field_name, None) is not None:
+                quarantined.add(qualified)
             dropped_notes.append(
                 Issue(
                     step=iss.step,
@@ -1470,6 +1473,8 @@ def infer_mapping(
     # ---- Order path is final. Later fields, then simple entities. ----
 
     def _drop_simple_entity(ent: Entity, reason: str) -> None:
+        if ent in chosen_tables:
+            quarantined.add(ent)
         chosen_tables.pop(ent, None)
         entity_columns.pop(ent, None)
         if ent == "purchases":
@@ -1735,6 +1740,7 @@ def infer_mapping(
             cols = entity_columns.get(ent_d)
             if cols is not None and field_name in cols:
                 cols.pop(field_name, None)
+                quarantined.add(f"{ent_d}.{field_name}")
                 changed = True
                 dropped_notes.append(
                     Issue(
@@ -1805,6 +1811,8 @@ def infer_mapping(
     issues = cleaned_issues
 
     remaining_errs = [iss.message for iss in issues if iss.severity == "error"]
+    if quarantined:
+        mapping = mapping.model_copy(update={"quarantined": sorted(quarantined)})
     return InferResult(
         mapping=mapping,
         steps=steps_log,

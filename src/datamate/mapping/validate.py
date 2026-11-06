@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime
 import re
 from decimal import Decimal
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel
 
@@ -418,9 +418,69 @@ def validate_mapping(
                 )
             )
 
+    issues.extend(_line_shape_issues(canon, lines_tm.columns))
     _validate_simple_entities(mapping, canon, issues)
 
     return issues, canon
+
+
+# Shares seen on 44 mapped shops: at most 3% of multi-item orders repeat one amount on
+# every line; a whole-order total mapped as line_amount repeats it on nearly all.
+_REPEATED_AMOUNT_SHARE = 0.5
+_MIN_PRODUCT_NAMES = 4
+_MIN_LINES_FOR_NAMES = 200
+
+
+def _line_shape_issues(canon: CanonicalData, line_columns: dict[str, Any]) -> list[Issue]:
+    """Whole-table checks that a few sample rows cannot show.
+
+    - line_amount repeats one value on every line of orders with different products:
+      the column holds the order total, so summing lines multiplies it.
+    - product_name has only a handful of values over many lines: the column is a kind
+      or attribute ("1 mặt", "2 mặt"), not the product.
+    """
+    out: list[Issue] = []
+    lines = canon.order_lines
+    if lines.empty:
+        return out
+    frame = lines[["order_id", "product_name", "line_amount"]].dropna(subset=["order_id"])
+    grouped = frame.groupby("order_id").agg(
+        n=("product_name", "size"),
+        names=("product_name", "nunique"),
+        amounts=("line_amount", "nunique"),
+    )
+    multi = grouped[(grouped["n"] >= 2) & (grouped["names"] >= 2)]
+    if len(multi) >= 20:
+        share = float((multi["amounts"] == 1).mean())
+        if share > _REPEATED_AMOUNT_SHARE:
+            out.append(
+                Issue(
+                    step="B_order_lines",
+                    severity="error",
+                    message=(
+                        f"line_amount ({line_columns.get('line_amount')!r}) is the same on every "
+                        f"line in {share:.0%} of orders that hold different products: that "
+                        "column looks like the whole-order total repeated per line. Map "
+                        "line_amount to the per-line money column, and the order total to "
+                        "orders.order_payable or order_subtotal."
+                    ),
+                )
+            )
+    names = lines["product_name"].dropna()
+    if len(names) >= _MIN_LINES_FOR_NAMES and names.nunique() < _MIN_PRODUCT_NAMES:
+        sample = sorted(map(str, names.unique()))
+        out.append(
+            Issue(
+                step="B_order_lines",
+                severity="error",
+                message=(
+                    f"product_name ({line_columns.get('product_name')!r}) has only "
+                    f"{names.nunique()} values {sample} over {len(names)} lines: that looks like "
+                    "a kind or option column, not the product name."
+                ),
+            )
+        )
+    return out
 
 
 def _join_rate(left_keys: list[object], right_keys: set[object]) -> float | None:

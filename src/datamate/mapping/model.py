@@ -338,6 +338,8 @@ class Mapping(BaseModel):
     purchase_status_map: dict[str, PurchaseStatus] = Field(default_factory=dict)
     tables: dict[Entity, TableMapping]
     notes: list[str] = Field(default_factory=list)
+    # "entity.field" or "entity" the shop records but whose mapping failed the checks.
+    quarantined: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_tables_and_fields(self) -> Mapping:
@@ -369,5 +371,7 @@ def mapping_fingerprint(mapping: Mapping) -> str:
     # Empty purchase_status_map must not change keys of pre-E1b order-only mappings.
     if not payload.get("purchase_status_map"):
         payload.pop("purchase_status_map", None)
+    if not payload.get("quarantined"):
+        payload.pop("quarantined", None)
     canonical_json = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()

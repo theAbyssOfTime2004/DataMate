@@ -144,3 +144,48 @@ def test_column_left_blank_in_the_period_abstains() -> None:
 def test_top_value_of_a_list_column_abstains() -> None:
     spec = AttrQuery(measure="top_value", value_of="Làm gì", period=JUNE)
     assert answer_attr(_engine(), spec, AS_OF).type == "abstain"
+
+
+def test_total_of_a_number_column() -> None:
+    engine = _engine()
+    engine.con.execute(TABLE_DDLS["order_measures"])
+    for row, (oid, km) in enumerate([("p1", 3), ("p2", 5), ("p3", 2), ("p4", 4), ("p5", 6)]):
+        engine.con.execute("INSERT INTO order_measures VALUES (?, ?, 'Số km', ?)", [oid, row, km])
+    numbers = [a for a in shop_attributes(engine, {}) if a.numeric]
+    assert [a.name for a in numbers] == ["Số km"]
+    spec = AttrQuery(measure="total", value_of="Số km", where=[_cond("Xe", "vision")], period=JUNE)
+    assert answer_attr(engine, spec, AS_OF).answer == 12  # p1, p2, p4
+
+
+def test_total_needs_a_number_column() -> None:
+    from datamate.query.attributes import to_attr_query
+    from datamate.query.convert import ConvertError
+
+    raw = {"family": "attr", "measure": "total", "value_of": "Xe", "where": [], "period": {"kind": "month_this"}}
+    with pytest.raises(ConvertError):
+        to_attr_query(raw, AS_OF, "Tháng này chạy bao nhiêu km?", ["Xe", "Số km"], ["Số km"])
+    raw["value_of"] = "Số km"
+    spec = to_attr_query(raw, AS_OF, "Tháng này chạy bao nhiêu km?", ["Xe", "Số km"], ["Số km"])
+    assert spec is not None and spec.measure == "total"
+
+
+def test_number_columns_skip_codes_and_repeat_order_totals() -> None:
+    from datamate.etl.build import number_columns
+
+    cells = [
+        ("o1", 1, "Trang", "120"),
+        ("o1", 2, "Trang", "80"),
+        ("o2", 3, "Trang", "40"),
+        ("o1", 1, "SĐT", "0901234567"),
+        ("o2", 3, "SĐT", "0912345678"),
+        ("o1", 1, "Tổng phiếu", "500.000"),
+        ("o1", 2, "Tổng phiếu", "500.000"),
+        ("o2", 3, "Tổng phiếu", "90.000"),
+    ]
+    rows = number_columns(cells)
+    by_name: dict[str, list[object]] = {}
+    for row in rows:
+        by_name.setdefault(str(row["name"]), []).append(row["value"])
+    assert sorted(by_name) == ["Trang", "Tổng phiếu"]
+    assert sum(by_name["Trang"]) == 240
+    assert len(by_name["Tổng phiếu"]) == 2  # one value per order

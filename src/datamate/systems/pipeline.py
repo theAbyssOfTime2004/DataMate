@@ -178,6 +178,16 @@ class PipelineSystem:
             self._client = None
 
     def answer(self, question: Question, workdir: Path) -> tuple[Answer, dict[str, Any]]:
+        answer, trace = self._answer(question, workdir)
+        quarantined = trace.get("quarantined") or []
+        if answer.type == "unanswerable" and quarantine_hit(answer.reason, quarantined):
+            # The shop has that data; only its mapping failed. Not knowing is not "absent".
+            trace["quarantine_abstain"] = answer.reason
+            trace["abstain_reason"] = "quarantined"
+            return Answer.abstain(), trace
+        return answer, trace
+
+    def _answer(self, question: Question, workdir: Path) -> tuple[Answer, dict[str, Any]]:
         trace: dict[str, Any] = {
             "system": self.name,
             "timings": {},
@@ -209,6 +219,8 @@ class PipelineSystem:
             bundle = self._bundle_for(split, business_id)
             trace["warnings"] = list(bundle.warnings)
             trace["mapping_fingerprint"] = bundle.mapping_fingerprint
+            if bundle.mapping is not None and bundle.mapping.quarantined:
+                trace["quarantined"] = list(bundle.mapping.quarantined)
             trace["rulebook_sha256"] = bundle.rulebook_sha256
             trace["rule_notes_n"] = len(bundle.rule_notes)
             if bundle.mapping_failed or bundle.engine is None or bundle.context is None:
@@ -947,3 +959,18 @@ def _size_word(spec: Any, product_names: list[str]) -> bool:
 
     size = getattr(spec, "size", None)
     return bool(size) and shop_sizes(product_names).get(size) == "word"
+
+
+def quarantine_hit(reason: str | None, quarantined: list[str]) -> bool:
+    """True when an unanswerable reason ("shop does not record X") names a quarantined
+    field ("orders.payment_method") or something of a quarantined entity ("debts")."""
+    if not reason or not quarantined:
+        return False
+    what = reason.removeprefix("shop does not record ").strip()
+    for item in quarantined:
+        entity, _, field_name = item.partition(".")
+        if what == item or (field_name and what == field_name):
+            return True
+        if not field_name and (what == entity or what.startswith(f"{entity}.")):
+            return True
+    return False

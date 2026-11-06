@@ -38,7 +38,23 @@ def shop_attributes(engine: MetricEngine, docs: dict[str, str]) -> list[ShopAttr
             [name, _SAMPLES],
         ).fetchall()
         out.append(ShopAttribute(name, docs.get(name), tuple(str(r[0]) for r in samples)))
+    if _ext_recorded(engine, "order_measures", "name"):
+        for (name,) in engine.con.execute(
+            "SELECT name FROM order_measures GROUP BY name ORDER BY COUNT(*) DESC, name"
+        ).fetchall():
+            samples = engine.con.execute(
+                "SELECT value FROM order_measures WHERE name = ? "
+                "GROUP BY value ORDER BY COUNT(*) DESC, value LIMIT ?",
+                [name, _SAMPLES],
+            ).fetchall()
+            shown = tuple(_number_text(r[0]) for r in samples)
+            out.append(ShopAttribute(str(name), docs.get(str(name)), shown, numeric=True))
     return out
+
+
+def _number_text(value: object) -> str:
+    text = format(Decimal(str(value)).normalize(), "f")
+    return text
 
 
 def _matches(values: list[str], cond: AttrCondition) -> bool:
@@ -85,7 +101,8 @@ def answer_attr(engine: MetricEngine, spec: AttrQuery, as_of: datetime.date) -> 
             params,
         ).fetchall():
             values[str(oid)][str(name)].append(fold(str(value)))
-        used = {c.attribute for c in spec.where} | {spec.distinct_of, spec.value_of} - {None}
+        text_value_of = None if spec.measure == "total" else spec.value_of
+        used = {c.attribute for c in spec.where} | {spec.distinct_of, text_value_of} - {None}
         for name in used:
             if _sparse_in_period(engine, str(name), values, list(money)):
                 raise _Abstain()
@@ -118,6 +135,8 @@ def answer_attr(engine: MetricEngine, spec: AttrQuery, as_of: datetime.date) -> 
             return Answer(type="number", answer=render_metric(metric, total, engine.rules))
         if spec.measure == "top_value":
             return _top_value(engine, spec, chosen, money, values)
+        if spec.measure == "total":
+            return _total(engine, spec, chosen)
         if spec.measure == "distinct":
             assert spec.distinct_of is not None
             seen = {v for oid in chosen for v in values[oid].get(spec.distinct_of, [])}
@@ -133,6 +152,27 @@ def answer_attr(engine: MetricEngine, spec: AttrQuery, as_of: datetime.date) -> 
         return Answer.unanswerable(str(exc))
     except (_Abstain, PeriodError):
         return Answer.abstain()
+
+
+def _total(engine: MetricEngine, spec: AttrQuery, chosen: list[str]) -> Answer:
+    """Sum of one number column over the chosen records; a record without it abstains."""
+    wanted = set(chosen)
+    if not wanted:
+        raise _Abstain()
+    sums: dict[str, Decimal] = {}
+    for oid, value in engine.con.execute(
+        "SELECT order_id, value FROM order_measures WHERE name = ?", [spec.value_of]
+    ).fetchall():
+        key = str(oid)
+        if key in wanted:
+            sums[key] = sums.get(key, Decimal(0)) + Decimal(str(value))
+    # Most chosen records must carry the number, else the column is about something else.
+    if len(sums) < 0.9 * len(wanted):
+        raise _Abstain()
+    total = sum(sums.values(), Decimal(0))
+    if total == total.to_integral_value():
+        return Answer(type="number", answer=int(total))
+    return Answer(type="number", answer=render_percent(total, engine.rules))
 
 
 def _staff_filter(

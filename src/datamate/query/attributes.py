@@ -28,7 +28,7 @@ from datamate.rules.parse_rulebook import RuleRow
 from datamate.timeres.calendar import CalendarError, LunarCalendar
 from datamate.timeres.periods import PeriodError, PeriodExpr, resolve
 
-AttrMeasure = Literal["count", "money", "distinct", "share", "top_value"]
+AttrMeasure = Literal["count", "money", "distinct", "share", "top_value", "total"]
 _KEYS = (
     "family",
     "measure",
@@ -63,7 +63,8 @@ class AttrQuery(BaseModel):
     where: list[AttrCondition] = Field(default_factory=list)
     distinct_of: str | None = None
     share_of_paid: bool = False
-    value_of: str | None = None  # top_value: the column whose most common value is asked
+    # top_value: the column whose most common value is asked; total: the number column summed
+    value_of: str | None = None
     top_by: Literal["count", "money"] = "count"
     weekday: int | None = Field(default=None, ge=1, le=7)  # 1 = Monday ... 7 = Sunday
     per_weekday: bool = False  # average per such weekday in the period
@@ -82,6 +83,7 @@ class ShopAttribute:
     name: str
     description: str | None
     samples: tuple[str, ...]
+    numeric: bool = False  # a number column (pages, km): only for measure total
 
 
 _SYSTEM = "\n".join(
@@ -230,7 +232,7 @@ def _schema(attributes: list[str]) -> dict[str, Any]:
             "family": {"type": "string", "enum": ["attr", "none"]},
             "measure": {
                 "type": ["string", "null"],
-                "enum": ["count", "money", "distinct", "share", None],
+                "enum": ["count", "money", "distinct", "share", "top_value", "total", None],
             },
             "staff": {"type": ["string", "null"]},
             "where": {
@@ -268,8 +270,19 @@ def _user(
 ) -> str:
     lines = [f"Hôm nay (as_of): {as_of.isoformat()}", "Text columns:"]
     for attr in attributes:
+        if attr.numeric:
+            continue
         about = f" ({attr.description})" if attr.description else ""
         lines.append(f'- "{attr.name}"{about}; e.g. ' + "; ".join(attr.samples))
+    numbers = [attr for attr in attributes if attr.numeric]
+    if numbers:
+        lines.append(
+            "Number columns (measure total = the sum of one of them over the records, "
+            "value_of = its name):"
+        )
+        for attr in numbers:
+            about = f" ({attr.description})" if attr.description else ""
+            lines.append(f'- "{attr.name}"{about}; e.g. ' + "; ".join(attr.samples))
     if rules:
         lines.append("Rulebook rows:")
         lines.extend(f"- {row.name}: {row.text}" for row in rules)
@@ -294,14 +307,18 @@ def build_attr_messages(
 
 
 def to_attr_query(
-    raw: object, as_of: datetime.date, question: str, attributes: list[str]
+    raw: object,
+    as_of: datetime.date,
+    question: str,
+    attributes: list[str],
+    numbers: list[str] | None = None,
 ) -> AttrQuery | None:
     if not isinstance(raw, dict):
         raise ConvertError("response is not an object")
     if raw.get("family") != "attr":
         return None
     measure = raw.get("measure")
-    if measure not in {"count", "money", "distinct", "share", "top_value"}:
+    if measure not in {"count", "money", "distinct", "share", "top_value", "total"}:
         raise ConvertError(f"bad measure {measure!r}")
     text = QuestionText(question)
     staff = raw.get("staff")
@@ -326,9 +343,15 @@ def to_attr_query(
         distinct_of = None
     if measure == "share" and not where:
         raise ConvertError("share needs a condition")
-    value_of = raw.get("value_of") if measure == "top_value" else None
-    if measure == "top_value" and value_of not in attributes:
-        raise ConvertError("top_value needs value_of")
+    number_names = list(numbers or [])
+    value_of = raw.get("value_of") if measure in {"top_value", "total"} else None
+    if measure == "top_value" and (value_of not in attributes or value_of in number_names):
+        raise ConvertError("top_value needs a text column in value_of")
+    if measure == "total" and value_of not in number_names:
+        raise ConvertError("total needs a number column in value_of")
+    for cond in where:
+        if cond.attribute in number_names:
+            raise ConvertError("conditions are on text columns")
     top_by = raw.get("top_by") or "count"
     if top_by not in {"count", "money"}:
         raise ConvertError(f"bad top_by {top_by!r}")
@@ -366,6 +389,7 @@ def parse_attr_question(
 ) -> AttrParseResult:
     """Two votes; they must agree (dates compared resolved)."""
     names = [attr.name for attr in attributes]
+    numbers = [attr.name for attr in attributes if attr.numeric]
     attempts: list[ParseAttempt] = []
     specs: list[AttrQuery] = []
     for few_shot_set in range(max(settings.parse_votes, 1)):
@@ -384,7 +408,7 @@ def parse_attr_question(
             attempts.append(ParseAttempt(few_shot_set, None, str(exc), 0))
             return AttrParseResult(None, "attr_parse_error", attempts)
         try:
-            spec = to_attr_query(raw, as_of, question, names)
+            spec = to_attr_query(raw, as_of, question, names, numbers)
         except ConvertError as exc:
             attempts.append(ParseAttempt(few_shot_set, raw, str(exc), 0))
             return AttrParseResult(None, "attr_parse_error", attempts)
@@ -430,6 +454,7 @@ def describe_attr(
         + ("records with money" if spec.share_of_paid else "all records"),
         "top_value": f'the "{spec.value_of}" value with the most '
         + ("money" if spec.top_by == "money" else "records"),
+        "total": f'sum of the number column "{spec.value_of}" over the records',
     }[spec.measure]
     days = ["", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     if spec.per_weekday and spec.weekday is not None:

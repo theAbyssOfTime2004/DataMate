@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from datamate.etl.schema import (
     CUSTOMERS_COLUMNS,
     ORDER_ADJUSTMENTS_COLUMNS,
+    ORDER_MEASURES_COLUMNS,
     ORDER_ATTRIBUTES_COLUMNS,
     ORDER_LINES_COLUMNS,
     ORDERS_COLUMNS,
@@ -91,6 +92,7 @@ class CanonicalData:
     drug_info: pd.DataFrame = field(default_factory=pd.DataFrame)
     order_attributes: pd.DataFrame = field(default_factory=pd.DataFrame)
     order_adjustments: pd.DataFrame = field(default_factory=pd.DataFrame)
+    order_measures: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 @dataclass
@@ -627,6 +629,56 @@ def _synthetic_order_id(file_name: str, sheet_name: str | None, row_no: int) -> 
 _BLANK_STATUS_SHARE = 0.5
 
 
+_MEASURE_NUMBER_SHARE = 0.95
+
+
+def number_columns(cells: list[tuple[str, int, str, str]]) -> list[dict[str, Any]]:
+    """Rows of the unmapped columns that hold amounts (pages, km, sheets).
+
+    A column counts when nearly every filled cell is a number and the numbers vary.
+    Codes and phone numbers (long digit runs, leading zeros) and dates are not amounts.
+    """
+    from datamate.parse.numbers import parse_decimal
+
+    by_column: dict[str, list[tuple[str, int, str]]] = {}
+    for oid, row, col, text in cells:
+        by_column.setdefault(col, []).append((oid, row, text))
+    out: list[dict[str, Any]] = []
+    for col, items in by_column.items():
+        parsed = []
+        for oid, row, text in items:
+            digits = text.replace(".", "").replace(",", "")
+            if "/" in text or ":" in text or (len(digits) >= 8 and digits.isdigit()):
+                continue
+            if digits.startswith("0") and len(digits) > 1 and digits.isdigit():
+                continue
+            value = parse_decimal(text)
+            if value is not None:
+                parsed.append((oid, row, value))
+        if not parsed or len(parsed) < _MEASURE_NUMBER_SHARE * len(items):
+            continue
+        if len({value for _o, _r, value in parsed}) < 2:
+            continue
+        # A number repeated on every row of an order belongs to the order (one value).
+        per_order: dict[str, set[Decimal]] = {}
+        rows_per_order: dict[str, int] = {}
+        for oid, _row, value in parsed:
+            per_order.setdefault(oid, set()).add(value)
+            rows_per_order[oid] = rows_per_order.get(oid, 0) + 1
+        multi = [oid for oid, n in rows_per_order.items() if n >= 2]
+        order_level = bool(multi) and sum(len(per_order[o]) == 1 for o in multi) >= 0.95 * len(
+            multi
+        )
+        seen: set[str] = set()
+        for oid, row, value in parsed:
+            if order_level:
+                if oid in seen:
+                    continue
+                seen.add(oid)
+            out.append({"order_id": oid, "src_row": row, "name": col, "value": value})
+    return out
+
+
 def split_adjustment_lines(
     lines: list[dict[str, Any]], products_df: pd.DataFrame
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -925,6 +977,7 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
     if is_derived_orders:
         mapped_raw_cols |= set(orders_tm.columns.values())
     attribute_rows: set[tuple[str, str, str]] = set()
+    measure_cells: list[tuple[str, int, str, str]] = []
 
     parsed_lines: list[dict[str, Any]] = []
     raw_lines_for_derived_orders: list[
@@ -952,6 +1005,8 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
                 text = _strip_str(cell)
                 if text and len(text) <= _MAX_ATTRIBUTE_LEN and any(ch.isalpha() for ch in text):
                     attribute_rows.add((oid, unicodedata.normalize("NFC", col), text))
+                elif text:
+                    measure_cells.append((oid, r_no, unicodedata.normalize("NFC", col), text))
 
         lno_raw = rdict.get(c_l_lno) if c_l_lno is not None else None
         lno = _parse_int_id(lno_raw) if lno_raw is not None else None
@@ -1451,6 +1506,7 @@ def build_canonical(raw: BusinessRaw, mapping: Mapping) -> CanonicalData:
     return CanonicalData(
         order_attributes=attributes_df,
         order_adjustments=_records_to_df(adjustment_rows, ORDER_ADJUSTMENTS_COLUMNS),
+        order_measures=_records_to_df(number_columns(measure_cells), ORDER_MEASURES_COLUMNS),
         orders=orders_df,
         order_lines=order_lines_df,
         products=products_df,

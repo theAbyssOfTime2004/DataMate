@@ -110,6 +110,7 @@ def test_fingerprint_ignores_empty_purchase_status_map() -> None:
     payload = m.model_dump(mode="json", exclude={"business_id", "notes"})
     assert payload.get("purchase_status_map") == {}
     payload.pop("purchase_status_map", None)
+    payload.pop("quarantined", None)
     expected = hashlib.sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()

@@ -18,7 +18,7 @@ from datamate.mapping.fields import FIELD_TYPES, SIMPLE_ENTITIES
 from datamate.mapping.model import Mapping, mapping_fingerprint
 
 # Bump on any change to ETL output shape/semantics (even if mapping fingerprint is unchanged).
-ETL_VERSION = "1.13"  # 1.13: non-catalog lines that only take money off as order_adjustments
+ETL_VERSION = "1.14"  # 1.14: order_adjustments (voucher lines), order_measures (number columns)
 
 _TYPE_FROM_FIELD: dict[str, str] = {
     "date": "DATE",
@@ -93,6 +93,7 @@ def _frames_from_canonical(data: CanonicalData) -> dict[str, pd.DataFrame]:
         frames[entity] = getattr(data, entity)
     frames["order_attributes"] = data.order_attributes
     frames["order_adjustments"] = data.order_adjustments
+    frames["order_measures"] = data.order_measures
     return frames
 
 
