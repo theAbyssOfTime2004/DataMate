@@ -394,6 +394,9 @@ def _optional_str(value: object) -> str | None:
 def _optional_size(value: object) -> str | None:
     if value is None:
         return None
-    if value not in {"M", "L", "m", "l"}:
-        raise ConvertError(f"size must be M or L, got {value!r}")
-    return str(value).upper()
+    from datamate.query.sizes import size_label
+
+    label = size_label(value)
+    if label is None:
+        raise ConvertError(f"size must be a size label, got {value!r}")
+    return label

@@ -53,7 +53,8 @@ CountOrList = Literal["count", "list"]
 CountOrShare = Literal["count", "share"]
 CountListOrCost = Literal["count", "list", "cost"]
 ThresholdOp = Literal[">=", ">"]
-CafeSize = Literal["M", "L"]
+# A size label from the shop's product names (datamate.query.sizes).
+CafeSize = str
 
 
 class QtySoldQuery(BaseModel):
@@ -70,8 +71,10 @@ class QtySoldQuery(BaseModel):
     def _one_target(self) -> QtySoldQuery:
         has_product = self.product is not None and self.product != ""
         has_unit = self.base_unit is not None and self.base_unit != ""
-        if has_product == has_unit:
+        if has_product and has_unit:
             raise ValueError("qty_sold needs exactly one of product or base_unit")
+        if not has_product and not has_unit and not self.size:
+            raise ValueError("qty_sold needs a product, a base_unit or a size")
         return self
 
 

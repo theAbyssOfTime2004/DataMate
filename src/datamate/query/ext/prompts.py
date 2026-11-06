@@ -631,12 +631,9 @@ def _user_message(
 
 
 def _sizes_offered(product_names: list[str]) -> list[str]:
-    found: list[str] = []
-    for code in ("M", "L"):
-        suffix = f"({code})".casefold()
-        if any(name.casefold().rstrip().endswith(suffix) for name in product_names):
-            found.append(code)
-    return found
+    from datamate.query.sizes import shop_sizes
+
+    return list(shop_sizes(product_names))
 
 
 def _join(values: list[str]) -> str:

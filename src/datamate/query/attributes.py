@@ -28,8 +28,20 @@ from datamate.rules.parse_rulebook import RuleRow
 from datamate.timeres.calendar import CalendarError, LunarCalendar
 from datamate.timeres.periods import PeriodError, PeriodExpr, resolve
 
-AttrMeasure = Literal["count", "money", "distinct", "share"]
-_KEYS = ("family", "measure", "staff", "where", "distinct_of", "share_of_paid", "period")
+AttrMeasure = Literal["count", "money", "distinct", "share", "top_value"]
+_KEYS = (
+    "family",
+    "measure",
+    "staff",
+    "where",
+    "distinct_of",
+    "share_of_paid",
+    "value_of",
+    "top_by",
+    "weekday",
+    "per_weekday",
+    "period",
+)
 _MAX_TOKENS = 300
 _MAX_CONDITIONS = 3
 
@@ -51,6 +63,10 @@ class AttrQuery(BaseModel):
     where: list[AttrCondition] = Field(default_factory=list)
     distinct_of: str | None = None
     share_of_paid: bool = False
+    value_of: str | None = None  # top_value: the column whose most common value is asked
+    top_by: Literal["count", "money"] = "count"
+    weekday: int | None = Field(default=None, ge=1, le=7)  # 1 = Monday ... 7 = Sunday
+    per_weekday: bool = False  # average per such weekday in the period
     period: PeriodExpr
 
 
@@ -76,7 +92,8 @@ _SYSTEM = "\n".join(
         "",
         "- measure: count (how many records) | money (money on the records) | distinct",
         "  (how many different values of one column, e.g. different vehicles) | share",
-        "  (percent of records that match `where`).",
+        "  (percent of records that match `where`) | top_value (the value of one column",
+        "  found on the most records, or with the most money).",
         "- staff: the staff name copied from the question, or null.",
         "- where: up to 3 conditions, all must hold. attribute = a column name from the",
         "  list; contains = the words the column must contain, in the shop's own spelling",
@@ -85,9 +102,14 @@ _SYSTEM = "\n".join(
         "- distinct_of: the column whose different values are counted (measure distinct).",
         "- share_of_paid: for share, true when the base is only records with money",
         "  (else all records).",
+        "- value_of: the column for top_value; top_by: count (most records) | money.",
+        "- weekday: only records on that day of the week (1 = thứ Hai ... 6 = thứ Bảy,",
+        "  7 = Chủ nhật), else null. per_weekday: true when the question asks the average",
+        "  per such day in the period (count or money divided by the number of those days).",
         "- period: from the question.",
-        'Set family to "none" when the question needs anything else (a ranking, a',
-        "table, an average, a customer, stock, or a column that is not listed).",
+        'Set family to "none" when the question needs anything else (a ranking of staff',
+        "or customers, a table, an average per record, a customer, stock, or a column that",
+        "is not listed).",
         "",
         *PERIOD_KIND_LINES,
         "The worked examples use an invented tailor, Tiệm may Hồng.",
@@ -121,6 +143,8 @@ def _parsed(**fields: Any) -> dict[str, Any]:
     row["family"] = "attr"
     row["where"] = []
     row["share_of_paid"] = False
+    row["top_by"] = "count"
+    row["per_weekday"] = False
     row.update(fields)
     return row
 
@@ -150,6 +174,14 @@ ATTR_FEW_SHOT_SETS: tuple[tuple[tuple[str, dict[str, Any]], ...], ...] = (
             ),
         ),
         (
+            "Thang 6/2024 tiem may Hong may kieu do nao nhieu nhat",
+            _parsed(
+                measure="top_value",
+                value_of="Đồ",
+                period=_period("month", month=6, year=2024),
+            ),
+        ),
+        (
             "Khách quen nào của tiệm may Hồng đặt đồ nhiều lần nhất hồi tuần trước?",
             _parsed(family="none", where=None, share_of_paid=None),
         ),
@@ -170,6 +202,15 @@ ATTR_FEW_SHOT_SETS: tuple[tuple[tuple[str, dict[str, Any]], ...], ...] = (
                 measure="distinct",
                 distinct_of="Đồ",
                 where=[_cond("Ghi chú", "sửa lại", negate=True)],
+                period=_period("month", month=7, year=2024),
+            ),
+        ),
+        (
+            "Tháng 7/2024 bình quân mỗi Chủ nhật tiệm may Hồng nhận mấy phiếu?",
+            _parsed(
+                measure="count",
+                weekday=7,
+                per_weekday=True,
                 period=_period("month", month=7, year=2024),
             ),
         ),
@@ -208,6 +249,10 @@ def _schema(attributes: list[str]) -> dict[str, Any]:
             },
             "distinct_of": {"type": ["string", "null"], "enum": [*attributes, None]},
             "share_of_paid": {"type": ["boolean", "null"]},
+            "value_of": {"type": ["string", "null"], "enum": [*attributes, None]},
+            "top_by": {"type": ["string", "null"], "enum": ["count", "money", None]},
+            "weekday": {"type": ["integer", "null"]},
+            "per_weekday": {"type": ["boolean", "null"]},
             "period": _period_object(),
         },
         "required": list(_KEYS),
@@ -256,7 +301,7 @@ def to_attr_query(
     if raw.get("family") != "attr":
         return None
     measure = raw.get("measure")
-    if measure not in {"count", "money", "distinct", "share"}:
+    if measure not in {"count", "money", "distinct", "share", "top_value"}:
         raise ConvertError(f"bad measure {measure!r}")
     text = QuestionText(question)
     staff = raw.get("staff")
@@ -281,6 +326,19 @@ def to_attr_query(
         distinct_of = None
     if measure == "share" and not where:
         raise ConvertError("share needs a condition")
+    value_of = raw.get("value_of") if measure == "top_value" else None
+    if measure == "top_value" and value_of not in attributes:
+        raise ConvertError("top_value needs value_of")
+    top_by = raw.get("top_by") or "count"
+    if top_by not in {"count", "money"}:
+        raise ConvertError(f"bad top_by {top_by!r}")
+    weekday = raw.get("weekday")
+    bad_day = isinstance(weekday, bool) or not isinstance(weekday, int) or not 1 <= weekday <= 7
+    if weekday is not None and bad_day:
+        raise ConvertError(f"weekday must be 1..7, got {weekday!r}")
+    per_weekday = bool(raw.get("per_weekday"))
+    if per_weekday and (weekday is None or measure not in {"count", "money"}):
+        raise ConvertError("per_weekday needs a weekday and a count or money")
     if raw.get("period") is None:
         raise ConvertError("period is required")
     return AttrQuery(
@@ -289,6 +347,10 @@ def to_attr_query(
         where=where,
         distinct_of=distinct_of,
         share_of_paid=bool(raw.get("share_of_paid")) if measure == "share" else False,
+        value_of=value_of,
+        top_by=top_by if measure == "top_value" else "count",
+        weekday=weekday,
+        per_weekday=per_weekday,
         period=period_from_raw(raw["period"], as_of),
     )  # type: ignore[arg-type]
 
@@ -366,14 +428,25 @@ def describe_attr(
         "distinct": f'number of different "{spec.distinct_of}" values',
         "share": "percent of records matching the conditions, out of "
         + ("records with money" if spec.share_of_paid else "all records"),
+        "top_value": f'the "{spec.value_of}" value with the most '
+        + ("money" if spec.top_by == "money" else "records"),
     }[spec.measure]
+    days = ["", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    if spec.per_weekday and spec.weekday is not None:
+        day = days[spec.weekday]
+        what = (
+            f"average {what} per {day} (the {day}s' total divided by the number of {day}s in"
+            " the period, days without records included)"
+        )
     lines = [
         f"measure: {what}",
         "records: " + (" and ".join(conds) if conds else "all"),
         f'staff: "{spec.staff}" only' if spec.staff else "staff: all",
         f"period: {span} (record date)",
-        "output: one number",
     ]
+    if spec.weekday is not None and not spec.per_weekday:
+        lines.append(f"only records on {days[spec.weekday]}s")
+    lines.append("output: one value" if spec.measure == "top_value" else "output: one number")
     return "\n".join(lines)
 
 

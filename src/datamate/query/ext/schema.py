@@ -42,7 +42,6 @@ _BY_VALUES: tuple[str, ...] = ("qty_base", "revenue", "gross_profit", "order_cou
 _MODE_VALUES: tuple[str, ...] = ("max", "min")
 _OUTPUT_VALUES: tuple[str, ...] = ("count", "list", "share", "cost")
 _OP_VALUES: tuple[str, ...] = (">=", ">")
-_SIZE_VALUES: tuple[str, ...] = ("M", "L")
 
 
 def _nullable_enum(values: list[str]) -> dict[str, Any]:
@@ -75,13 +74,10 @@ def _buckets_schema() -> dict[str, Any]:
 
 
 def _sizes_in_shop(product_names: list[str]) -> list[str]:
-    """Cafe size codes present as name suffixes like '(M)' / '(L)'."""
-    found: list[str] = []
-    for code in _SIZE_VALUES:
-        suffix = f"({code})".casefold()
-        if any(name.casefold().rstrip().endswith(suffix) for name in product_names):
-            found.append(code)
-    return found
+    """Size labels the shop writes in product names ('(M)', 'size XL')."""
+    from datamate.query.sizes import shop_sizes
+
+    return list(shop_sizes(product_names))
 
 
 def ext_parsed_schema(ctx: ShopContext, products: list[str]) -> dict[str, Any]:

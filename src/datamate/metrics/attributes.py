@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import datetime
-from collections import defaultdict
+from collections import Counter, defaultdict
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -66,15 +66,16 @@ def answer_attr(engine: MetricEngine, spec: AttrQuery, as_of: datetime.date) -> 
             if not _ext_recorded(engine, "orders", "employee_id"):
                 raise Unanswerable("orders.employee_id")
             where, params = _staff_filter(engine, spec.staff, where, params)
-        money = {
-            str(oid): int(amount or 0)
-            for oid, amount in engine.con.execute(
-                f"SELECT o.order_id, COALESCE(SUM(l.line_amount), 0) FROM orders o "
-                f"LEFT JOIN order_lines l ON l.order_id = o.order_id WHERE {where} "
-                "GROUP BY o.order_id",
-                params,
-            ).fetchall()
-        }
+        money: dict[str, int] = {}
+        dates: dict[str, datetime.date] = {}
+        for oid, day, amount in engine.con.execute(
+            f"SELECT o.order_id, o.order_date, COALESCE(SUM(l.line_amount), 0) FROM orders o "
+            f"LEFT JOIN order_lines l ON l.order_id = o.order_id WHERE {where} "
+            "GROUP BY o.order_id, o.order_date",
+            params,
+        ).fetchall():
+            money[str(oid)] = int(amount or 0)
+            dates[str(oid)] = day
         if not money:
             raise _Abstain()
         values: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
@@ -84,18 +85,39 @@ def answer_attr(engine: MetricEngine, spec: AttrQuery, as_of: datetime.date) -> 
             params,
         ).fetchall():
             values[str(oid)][str(name)].append(fold(str(value)))
+        used = {c.attribute for c in spec.where} | {spec.distinct_of, spec.value_of} - {None}
+        for name in used:
+            if _sparse_in_period(engine, str(name), values, list(money)):
+                raise _Abstain()
+        if spec.weekday is not None:
+            money = {oid: v for oid, v in money.items() if dates[oid].isoweekday() == spec.weekday}
         chosen = [
             oid
             for oid in money
             if all(_matches(values[oid].get(c.attribute, []), c) for c in spec.where)
         ]
-        if spec.measure == "count":
-            return Answer(
-                type="number", answer=render_metric("order_count", len(chosen), engine.rules)
-            )
-        if spec.measure == "money":
-            total = sum(money[oid] for oid in chosen)
-            return Answer(type="number", answer=render_metric("revenue", total, engine.rules))
+        if spec.measure in {"count", "money"}:
+            total = len(chosen) if spec.measure == "count" else sum(money[oid] for oid in chosen)
+            if spec.per_weekday:
+                assert spec.weekday is not None
+                days = sum(
+                    1
+                    for i in range((window.end - window.start).days + 1)
+                    if (window.start + datetime.timedelta(days=i)).isoweekday() == spec.weekday
+                )
+                if days == 0:
+                    raise _Abstain()
+                mean = Decimal(total) / Decimal(days)
+                # An average of money is money (whole đồng); other averages keep 2 decimals.
+                if spec.measure == "money":
+                    return Answer(
+                        type="number", answer=render_metric("avg_order_value", mean, engine.rules)
+                    )
+                return Answer(type="number", answer=render_percent(mean, engine.rules))
+            metric = "order_count" if spec.measure == "count" else "revenue"
+            return Answer(type="number", answer=render_metric(metric, total, engine.rules))
+        if spec.measure == "top_value":
+            return _top_value(engine, spec, chosen, money, values)
         if spec.measure == "distinct":
             assert spec.distinct_of is not None
             seen = {v for oid in chosen for v in values[oid].get(spec.distinct_of, [])}
@@ -144,3 +166,57 @@ def _found_anywhere(engine: MetricEngine, cond: AttrCondition) -> bool:
         if wanted in f" {fold(str(value))} ":
             return True
     return False
+
+
+# A column with more different values than this holds free text (plates, job lists), not a
+# small set of kinds, so "which one is most common" has no meaningful answer.
+_MAX_KINDS = 30
+
+
+def _top_value(
+    engine: MetricEngine,
+    spec: AttrQuery,
+    chosen: list[str],
+    money: dict[str, int],
+    values: dict[str, dict[str, list[str]]],
+) -> Answer:
+    assert spec.value_of is not None
+    kinds = engine.con.execute(
+        "SELECT value FROM order_attributes WHERE name = ?", [spec.value_of]
+    ).fetchall()
+    spellings: dict[str, Counter[str]] = defaultdict(Counter)
+    for (value,) in kinds:
+        spellings[fold(str(value))][str(value)] += 1
+    if not spellings or len(spellings) > _MAX_KINDS:
+        raise _Abstain()
+    # Cells that list several items ("cắt, gội") are not one kind each.
+    written = [value for counter in spellings.values() for value in counter]
+    if sum("," in value for value in written) * 5 >= len(written):
+        raise _Abstain()
+    totals: Counter[str] = Counter()
+    for oid in chosen:
+        for value in set(values[oid].get(spec.value_of, [])):
+            totals[value] += money[oid] if spec.top_by == "money" else 1
+    if not totals:
+        raise _Abstain()
+    best = min(totals, key=lambda v: (-totals[v], v))
+    return Answer(type="string", answer=spellings[best].most_common(1)[0][0])
+
+
+def _sparse_in_period(
+    engine: MetricEngine,
+    name: str,
+    values: dict[str, dict[str, list[str]]],
+    period_orders: list[str],
+) -> bool:
+    """True when the column is filled far less often in the period than in the whole book
+    (a month the owner stopped writing it): counts over it would be short."""
+    total_orders = engine._scalar("SELECT COUNT(*) FROM orders", [])
+    filled = engine._scalar(
+        "SELECT COUNT(DISTINCT order_id) FROM order_attributes WHERE name = ?", [name]
+    )
+    if not total_orders or not period_orders:
+        return False
+    overall = int(filled or 0) / int(total_orders)
+    in_period = sum(1 for oid in period_orders if values[oid].get(name)) / len(period_orders)
+    return in_period < overall / 2

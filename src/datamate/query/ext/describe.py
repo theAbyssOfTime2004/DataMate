@@ -57,6 +57,7 @@ def describe_ext_spec(
     product_unit: str | None = None,
     customer_who: str | None = None,
     debt_meta: dict[str, str] | None = None,
+    size_word: bool = False,
 ) -> str:
     """One line per facet: what the spec computes and what it does not restrict.
 
@@ -70,7 +71,7 @@ def describe_ext_spec(
         return _lines(
             _measure_qty(spec.base_unit if spec.product is None else product_unit),
             _products_line(product=spec.product, category=spec.category, base_unit=spec.base_unit),
-            _size_line(spec.size),
+            _size_line(spec.size, size_word),
             _common_unrestricted(),
             _period_line(spec.period, as_of, rules, cal),
             "output: one number (units sold)",
@@ -80,7 +81,7 @@ def describe_ext_spec(
         return _lines(
             f"measure: {measure}",
             _products_line(product=None, category=spec.category, base_unit=None),
-            _size_line(spec.size),
+            _size_line(spec.size, size_word),
             _common_unrestricted(),
             _period_line(spec.period, as_of, rules, cal),
             _top_output(spec.k, measure, spec.mode),
@@ -453,9 +454,11 @@ def _products_line(
     return "products: all products"
 
 
-def _size_line(size: str | None) -> str:
+def _size_line(size: str | None, word: bool = False) -> str:
     if size is None:
         return "size: none"
+    if word:
+        return f'size: "{size}" only (names with "size {size}")'
     return f'size: "{size}" only (names ending with ({size}))'
 
 

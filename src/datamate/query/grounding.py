@@ -72,6 +72,12 @@ def _marked_words(text: str) -> list[str]:
     return re.findall(r"\w+", unicodedata.normalize("NFC", text.casefold()))
 
 
+def _is_initialism(word: str) -> bool:
+    """An upper-case short form of four or five letters ("TMĐT"); three-letter codes
+    such as COD are too easy to spell by chance."""
+    return 4 <= len(word) <= 5 and word.isalpha() and word.isupper()
+
+
 def _same_word(written: str, wanted: str) -> bool:
     """Exact, or one stray trailing letter on a longer word ("thoaij", "mooix")."""
     return written == wanted or (
@@ -108,7 +114,23 @@ class QuestionText:
             return False
         if all(self.has_word(word) for word in folded.split()):
             return True
-        return any(self.has_phrase(alias) for alias in _ALIASES.get(folded, ()))
+        if any(self.has_phrase(alias) for alias in _ALIASES.get(folded, ())):
+            return True
+        # "Sàn TMĐT": an upper-case short form matches the words it stands for.
+        words = re.findall(r"\w+", unicodedata.normalize("NFC", value))
+        return bool(words) and any(_is_initialism(word) for word in words) and all(
+            self.has_word(fold(word)) or (_is_initialism(word) and self.has_initials(fold(word)))
+            for word in words
+            if fold(word)
+        )
+
+    def has_initials(self, letters: str) -> bool:
+        """Consecutive question words whose first letters spell `letters`."""
+        size = len(letters)
+        return any(
+            "".join(word[0] for word in self.words[i : i + size]) == letters
+            for i in range(len(self.words) - size + 1)
+        )
 
     def product_word_hits(self, name: str) -> tuple[int, int]:
         """(words of the name found in the question, words that count).

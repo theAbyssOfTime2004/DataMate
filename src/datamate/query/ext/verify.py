@@ -790,6 +790,7 @@ def verify_ext_spec(
     product_unit: str | None = None,
     customer_who: str | None = None,
     debt_meta: dict[str, str] | None = None,
+    size_word: bool = False,
 ) -> tuple[float, str]:
     """Return (p_yes, description)."""
     description = describe_ext_spec(
@@ -800,6 +801,7 @@ def verify_ext_spec(
         product_unit=product_unit,
         customer_who=customer_who,
         debt_meta=debt_meta,
+        size_word=size_word,
     )
     return verify_description(question, description, client), description
 

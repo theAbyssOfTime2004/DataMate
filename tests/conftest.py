@@ -16,3 +16,6 @@ def _no_extra_checks(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "event_path", False)
     monkeypatch.setattr(settings, "unit_terms", False)
     monkeypatch.setattr(settings, "attribute_path", False)
+    monkeypatch.setattr(settings, "missing_group_check", False)
+    monkeypatch.setattr(settings, "missing_attribute_check", False)
+    monkeypatch.setattr(settings, "plain_retry", False)

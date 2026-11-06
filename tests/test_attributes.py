@@ -112,3 +112,35 @@ def test_shop_attributes_carry_readme_docs_and_samples() -> None:
 def test_condition_no_record_meets_abstains() -> None:
     spec = AttrQuery(measure="count", where=[_cond("Làm gì", "thay dầu láp")], period=JUNE)
     assert answer_attr(_engine(), spec, AS_OF).type == "abstain"
+
+
+def test_average_per_weekday_counts_days_without_records() -> None:
+    # June 2026 has five Mondays; only p1 (1 June) is on a Monday.
+    spec = AttrQuery(measure="count", weekday=1, per_weekday=True, period=JUNE)
+    assert answer_attr(_engine(), spec, AS_OF).answer == 0.2
+
+
+def test_top_value_takes_the_shop_spelling() -> None:
+    spec = AttrQuery(measure="top_value", value_of="Xe", period=JUNE)
+    answer = answer_attr(_engine(), spec, AS_OF)
+    assert (answer.type, answer.answer) == ("string", "Vision 59A1-111.11")
+
+
+def test_column_left_blank_in_the_period_abstains() -> None:
+    engine = _engine()
+    # May: ten visits, all with a vehicle kind; June visits have none.
+    for i in range(10):
+        oid = f"m{i}"
+        engine.con.execute(
+            "INSERT INTO orders (order_id, order_date, status, has_return, employee_id)"
+            " VALUES (?, ?, 'completed', FALSE, 'An')",
+            [oid, datetime.date(2026, 5, 1 + i)],
+        )
+        engine.con.execute("INSERT INTO order_attributes VALUES (?, 'Loại', 'tay ga')", [oid])
+    spec = AttrQuery(measure="count", where=[_cond("Loại", "tay ga")], period=JUNE)
+    assert answer_attr(engine, spec, AS_OF).type == "abstain"
+
+
+def test_top_value_of_a_list_column_abstains() -> None:
+    spec = AttrQuery(measure="top_value", value_of="Làm gì", period=JUNE)
+    assert answer_attr(_engine(), spec, AS_OF).type == "abstain"

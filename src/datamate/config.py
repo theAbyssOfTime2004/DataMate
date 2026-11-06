@@ -136,6 +136,22 @@ class Settings(BaseSettings):
     # get the attribute block: filter, count, distinct values or a share. No train abstain
     # reaches it; on an invented salon shop it added 3 right answers and no wrong one.
     attribute_path: bool = True
+    # After an abstain: a question about a product group in a shop that records no groups
+    # (none mapped, and no raw column of at most this many kinds holds the name) is
+    # unanswerable, as the rulebook says. Never fires on train (every train shop has groups);
+    # on public it fired on 4 abstains, all in shops whose files carry no group at all.
+    # After an abstain the parser cannot resolve, parse once more from the question
+    # rewritten in plain Vietnamese (datamate.parse.plain). Numbers and product names
+    # must survive the rewrite. Off: train abstains dev 16/16, val 12 right + 1 wrong
+    # ("bữa qua" rewritten as "vừa qua"); the rewrite can change a period.
+    plain_retry: bool = False
+    # A question on a customer attribute (gender, street, group) whose value is in no
+    # raw cell and that no column records (model p below the max) is unanswerable.
+    # Train abstains: 7 fired, 7 right (dev 6, val 1).
+    missing_attribute_check: bool = True
+    missing_attribute_max_p: float = 0.2
+    missing_group_check: bool = True
+    missing_group_kinds: int = 50
     defined_term_threshold: float = 0.9
     rank_verify_threshold: float = 0.9
 

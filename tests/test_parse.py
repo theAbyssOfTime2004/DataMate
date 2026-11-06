@@ -210,3 +210,16 @@ def test_expand_short_years_only_where_a_month_cannot_be() -> None:
     # Day/month, full dates, ratios and decimals stay as written.
     for text in ("ngay 5/12", "tu 15/02/2026", "24/7", "1.2/25x", "22 vien/m2"):
         assert expand_short_years(text) == text
+
+
+def test_spell_month_abbrev_keeps_weekdays() -> None:
+    from datamate.parse.text import spell_month_abbrev
+
+    assert spell_month_abbrev("Dthu T4/2025 bao nhieu") == "Dthu tháng 4/2025 bao nhieu"
+    assert spell_month_abbrev("th7, th8, th9/2025") == "tháng 7, tháng 8, tháng 9/2025"
+    assert spell_month_abbrev("Thg 11 ban") == "tháng 11 ban"
+    assert spell_month_abbrev("Dthu ca chiều 3-2026 cao") == "Dthu ca chiều tháng 3/2026 cao"
+    assert spell_month_abbrev("th3-2026 ban") == "tháng 3/2026 ban"
+    assert spell_month_abbrev("ngày 12-3-2026") == "ngày 12-3-2026"
+    for text in ("T2 tuần này bán bao nhiêu", "thứ 3 bán", "thu 2 ban", "th3.5 kg", "T4 2025"):
+        assert spell_month_abbrev(text) == text

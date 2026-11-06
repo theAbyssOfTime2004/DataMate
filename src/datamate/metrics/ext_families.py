@@ -134,8 +134,20 @@ def _qty_sold(engine: MetricEngine, spec: QtySoldQuery, as_of: datetime.date) ->
     if spec.product is not None:
         keys = _require_product_keys(engine, spec.product)
         where, params = _apply_product_filter(where, params, keys, spec.product)
+    elif spec.base_unit is None:
+        # Size only ("mấy ly size M, tất cả các món"): the products must share one unit.
+        assert spec.size is not None
+        if _ext_recorded(engine, "products", "base_unit"):
+            units = engine.con.execute(
+                "SELECT COUNT(DISTINCT p.base_unit), COUNT(*) - COUNT(p.base_unit) "
+                "FROM order_lines l JOIN orders o ON o.order_id = l.order_id "
+                "LEFT JOIN products p ON p.product_key = l.product_key "
+                f"WHERE {where}",
+                params,
+            ).fetchone()
+            if units is None or units[0] > 1 or units[1] > 0:
+                raise _Abstain()
     else:
-        assert spec.base_unit is not None
         if not _ext_recorded(engine, "products", "base_unit"):
             raise Unanswerable("base_unit")
         where += (
@@ -365,6 +377,23 @@ def _apply_size_filter(
 ) -> tuple[str, list[Any]]:
     if size is None:
         return where, params
+    from datamate.query.sizes import name_has_size, shop_sizes
+
+    names = [
+        str(row[0])
+        for row in engine.con.execute(
+            "SELECT DISTINCT product_name FROM order_lines WHERE product_name IS NOT NULL"
+        ).fetchall()
+    ]
+    form = shop_sizes(names).get(size)
+    if form is None:
+        raise _Abstain()
+    if form == "word":
+        # "Tã dán ... size XL 40 miếng": the size is a word inside the name.
+        wanted = [name for name in names if name_has_size(name, size)]
+        marks = ", ".join("?" for _ in wanted)
+        where += f" AND l.product_name IN ({marks})"
+        return where, [*params, *wanted]
     suffix = engine.rules.size_suffixes.get(size)
     if suffix is None:
         raise _Abstain()

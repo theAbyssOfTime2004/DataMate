@@ -974,3 +974,109 @@ def test_ext_decide_accepts_split_vote_with_flag() -> None:
     assert both.split_vote is False
     none = _decide([("out", None), ("out", None)], [], as_of, RuleConfig(), LunarCalendar({}))
     assert none.spec is None and none.reason == "out_of_scope"
+
+
+def test_size_word_in_name_and_size_only_total(tmp_path: Path) -> None:
+    from datamate.query.context import ShopContext
+    from datamate.query.ext.schema import ext_parsed_schema
+    from datamate.query.sizes import shop_sizes
+
+    names = {
+        "am": "Tã dán Alpha size M 60 miếng",
+        "bm": "Tã quần Beta size M 50 miếng",
+        "axl": "Tã dán Alpha size XL 40 miếng",
+        "cup": "Cốc tập uống Mini",
+    }
+    units = {"am": "bịch", "bm": "bịch", "axl": "bịch", "cup": "cái"}
+    orders = [_order(f"o{i}", datetime.date(2026, 6, i), "completed") for i in range(1, 5)]
+    lines = [
+        _line(
+            f"o{i}",
+            product_key=key,
+            product_id=key.upper(),
+            name=names[key],
+            qty=Decimal(qty),
+            qty_base=Decimal(qty),
+            unit_price=100000,
+            line_amount=100000 * qty,
+            cost_per_unit=50000,
+        )
+        for i, (key, qty) in enumerate([("am", 2), ("bm", 3), ("axl", 4), ("cup", 7)], start=1)
+    ]
+    products = [
+        {"product_key": k, "product_id": k.upper(), "product_name": n, "base_unit": units[k]}
+        for k, n in names.items()
+    ]
+    data = CanonicalData(
+        orders=_frame(ORDERS_COLUMNS, orders),
+        order_lines=_frame(ORDER_LINES_COLUMNS, lines),
+        products=_frame(PRODUCTS_COLUMNS, products),
+        unit_conversions=_frame(UNIT_CONVERSIONS_COLUMNS, []),
+        customers=_frame(CUSTOMERS_COLUMNS, []),
+        report=EtlReport(),
+    )
+    path = tmp_path / "baby.duckdb"
+    write_duckdb(data, path)
+    con = duckdb.connect(str(path), read_only=True)
+    eng = MetricEngine(con, RuleConfig(), LunarCalendar({}), DATA_START, DATA_END)
+    june = MonthExpr(month=6, year=2026)
+    assert eng.answer_ext(QtySoldQuery(size="M", period=june), AS_OF).answer == 5
+    assert eng.answer_ext(QtySoldQuery(size="XL", period=june), AS_OF).answer == 4
+    assert eng.answer_ext(QtySoldQuery(size="L", period=june), AS_OF).type == "abstain"
+    con.close()
+
+    assert shop_sizes(list(names.values())) == {"M": "word", "XL": "word"}
+    assert shop_sizes(["Trà vải (L)", "Trà vải (M)", "Phí ship (COD)"]) == {
+        "M": "suffix",
+        "L": "suffix",
+    }
+    ctx = ShopContext(
+        payment_methods=[],
+        channels=[],
+        segments=[],
+        categories=[],
+        product_names=list(names.values()),
+        has_order_ts=False,
+        data_start=DATA_START,
+        data_end=DATA_END,
+        base_units=["bịch", "cái"],
+    )
+    schema = ext_parsed_schema(ctx, list(ctx.product_names))
+    assert schema["properties"]["size"]["enum"] == ["M", "XL", None]
+
+
+def test_size_only_total_needs_one_unit(tmp_path: Path) -> None:
+    orders = [_order(f"o{i}", datetime.date(2026, 6, i), "completed") for i in (1, 2)]
+    lines = [
+        _line(
+            f"o{i}",
+            product_key=key,
+            product_id=key.upper(),
+            name=name,
+            qty=Decimal(1),
+            qty_base=Decimal(1),
+            unit_price=20000,
+            line_amount=20000,
+            cost_per_unit=5000,
+        )
+        for i, (key, name) in enumerate([("t", "Trà (M)"), ("b", "Bánh (M)")], start=1)
+    ]
+    products = [
+        {"product_key": "t", "product_id": "T", "product_name": "Trà (M)", "base_unit": "ly"},
+        {"product_key": "b", "product_id": "B", "product_name": "Bánh (M)", "base_unit": "cái"},
+    ]
+    data = CanonicalData(
+        orders=_frame(ORDERS_COLUMNS, orders),
+        order_lines=_frame(ORDER_LINES_COLUMNS, lines),
+        products=_frame(PRODUCTS_COLUMNS, products),
+        unit_conversions=_frame(UNIT_CONVERSIONS_COLUMNS, []),
+        customers=_frame(CUSTOMERS_COLUMNS, []),
+        report=EtlReport(),
+    )
+    path = tmp_path / "mixed.duckdb"
+    write_duckdb(data, path)
+    con = duckdb.connect(str(path), read_only=True)
+    eng = MetricEngine(con, RuleConfig(), LunarCalendar({}), DATA_START, DATA_END)
+    answer = eng.answer_ext(QtySoldQuery(size="M", period=MonthExpr(month=6, year=2026)), AS_OF)
+    assert answer.type == "abstain"
+    con.close()

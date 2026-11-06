@@ -28,7 +28,8 @@ from datamate.metrics.events import has_event_log
 from datamate.metrics.ext_families import product_base_unit
 from datamate.metrics.rank import answer_rank
 from datamate.metrics.units import answer_unit
-from datamate.parse.text import expand_short_years
+from datamate.parse.plain import plain_question
+from datamate.parse.text import expand_short_years, spell_month_abbrev
 from datamate.query.attributes import describe_attr, parse_attr_question, readme_column_docs
 from datamate.query.context import ShopContext, load_shop_context
 from datamate.query.defined_terms import (
@@ -41,6 +42,13 @@ from datamate.query.defined_terms import (
 from datamate.query.events import parse_event_question
 from datamate.query.ext import parse_ext_question
 from datamate.query.ext.verify import verify_description, verify_ext_spec
+from datamate.query.missing_attributes import (
+    asked_customer_attribute,
+    attribute_column_p,
+    column_values,
+    value_recorded,
+)
+from datamate.query.missing_groups import asked_product_group, group_is_unrecorded, kind_values
 from datamate.query.parse import ParseAttempt, parse_question
 from datamate.query.rank import describe_rank, parse_rank_question
 from datamate.query.spec import (
@@ -117,6 +125,11 @@ class _BusinessBundle:
     rulebook_sha256: str = ""
     # README descriptions of the sales book's columns ("Xe": "dòng xe và biển số").
     attribute_docs: dict[str, str] = field(default_factory=dict)
+    # Folded values of raw columns that hold a few kinds (groups the mapping may have missed).
+    kind_values: set[str] = field(default_factory=set)
+    # Raw tables, and (table, header, folded values) per column built on first use.
+    raw_tables: list[Any] = field(default_factory=list)
+    raw_columns: list[tuple[str, str, set[str]]] | None = None
     # DuckDB connections are not thread-safe; engine calls for one shop take turns.
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -179,7 +192,7 @@ class PipelineSystem:
             "sql": [],
         }
         wall_t0 = time.perf_counter()
-        written = expand_short_years(question.question)
+        written = spell_month_abbrev(expand_short_years(question.question))
         if written != question.question:
             trace["question_rewritten"] = written
             question = question.model_copy(update={"question": written})
@@ -236,6 +249,14 @@ class PipelineSystem:
                     # (predict would rerun the whole question).
                     trace["thinking_error"] = f"{type(exc).__name__}: {exc}"
                     return answer, trace
+            if (
+                settings.plain_retry
+                and answer.type == "abstain"
+                and trace.get("abstain_reason") in _THINKING_RETRY_REASONS
+            ):
+                answer, trace = self._answer_via_plain(
+                    question, bundle, base_trace, answer, trace, wall_t0
+                )
             if answer.type == "abstain" and settings.unit_terms:
                 answer, trace = self._answer_via_unit(
                     question, split, bundle, answer, trace, wall_t0
@@ -244,6 +265,17 @@ class PipelineSystem:
                 answer, trace = self._answer_via_attributes(
                     question, split, bundle, answer, trace, wall_t0
                 )
+            if answer.type == "abstain" and settings.missing_group_check:
+                products = bundle.context.product_names if bundle.context else []
+                group = asked_product_group(question.question, self.client, products)
+                trace["asked_product_group"] = group
+                categories = bundle.context.categories if bundle.context else []
+                if group and group_is_unrecorded(group, categories, bundle.kind_values):
+                    answer = Answer.unanswerable("the shop records no product groups")
+                    trace["abstain_reason"] = None
+                    trace["unanswerable_reason"] = answer.reason
+            if answer.type == "abstain" and settings.missing_attribute_check:
+                answer = self._missing_attribute(question, bundle, answer, trace)
             return answer, trace
         except LLMUnavailable as exc:
             # Infrastructure, not the system's judgement. Nothing is cached for the shop,
@@ -420,6 +452,7 @@ class PipelineSystem:
             product_unit=product_unit,
             customer_who=customer_who,
             debt_meta=debt_meta,
+            size_word=_size_word(ext.spec, bundle.context.product_names),
         )
         trace["timings"]["ext_verify_s"] = round(time.perf_counter() - verify_t0, 6)
         trace["ext_verify_p"] = round(p_yes, 4)
@@ -597,6 +630,63 @@ class PipelineSystem:
             answer = answer_rank(bundle.engine, parsed.spec, question.as_of_date)
         trace["timings"]["engine_s"] = round(time.perf_counter() - engine_t0, 6)
         return done(answer, "engine_abstain" if answer.type == "abstain" else None)
+
+    def _missing_attribute(
+        self,
+        question: Question,
+        bundle: _BusinessBundle,
+        answer: Answer,
+        trace: dict[str, Any],
+    ) -> Answer:
+        """Unanswerable when the asked customer attribute is recorded nowhere."""
+        asked = asked_customer_attribute(question.question, self.client)
+        trace["asked_customer_attribute"] = None if asked is None else asked.__dict__
+        if asked is None:
+            return answer
+        with bundle.lock:
+            if bundle.raw_columns is None:
+                bundle.raw_columns = column_values(bundle.raw_tables)
+            columns = bundle.raw_columns
+        if value_recorded(asked.value, columns):
+            trace["customer_attribute_recorded"] = "value"
+            return answer
+        p_column = attribute_column_p(asked.attribute, columns, self.client)
+        trace["customer_attribute_column_p"] = round(p_column, 4)
+        if p_column >= settings.missing_attribute_max_p:
+            return answer
+        trace["abstain_reason"] = None
+        trace["unanswerable_reason"] = "the shop records no such customer attribute"
+        return Answer.unanswerable("the shop records no such customer attribute")
+
+    def _answer_via_plain(
+        self,
+        question: Question,
+        bundle: _BusinessBundle,
+        base_trace: dict[str, Any],
+        answer: Answer,
+        trace: dict[str, Any],
+        wall_t0: float,
+    ) -> tuple[Answer, dict[str, Any]]:
+        """Parse once more from the question written in plain Vietnamese."""
+        products = bundle.context.product_names if bundle.context else []
+        plain = plain_question(question.question, self.client, products)
+        trace["plain_question"] = plain
+        if plain is None:
+            return answer, trace
+        retry_trace = copy.deepcopy(base_trace)
+        retry_trace["plain_question"] = plain
+        retry_trace["plain_from"] = {
+            "abstain_reason": trace.get("abstain_reason"),
+            "ext_family": trace.get("ext_family"),
+        }
+        rewritten = question.model_copy(update={"question": plain})
+        new_answer, new_trace = self._parse_and_answer(
+            rewritten, bundle, retry_trace, wall_t0, self.client
+        )
+        if new_answer.type == "abstain":
+            trace["plain_abstain_reason"] = new_trace.get("abstain_reason")
+            return answer, trace
+        return new_answer, new_trace
 
     def _answer_via_unit(
         self,
@@ -787,6 +877,8 @@ class PipelineSystem:
             unsupported_knobs=unsupported,
             rulebook_sha256=rulebook.rulebook_sha256,
             attribute_docs=readme_column_docs(profile.readme_text),
+            kind_values=kind_values(raw.tables),
+            raw_tables=list(raw.tables),
         )
         self._by_business[key] = bundle
         return bundle
@@ -847,3 +939,11 @@ def _engine_details(engine: MetricEngine, spec: QuerySpec, as_of: Any) -> dict[s
         coverages.append(found.coverage)
         sqls.append(found.sql)
     return {"resolved_ranges": ranges, "coverage": coverages, "sql": sqls}
+
+
+def _size_word(spec: Any, product_names: list[str]) -> bool:
+    """True when the spec's size is written as a word in this shop ("size XL")."""
+    from datamate.query.sizes import shop_sizes
+
+    size = getattr(spec, "size", None)
+    return bool(size) and shop_sizes(product_names).get(size) == "word"
